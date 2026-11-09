@@ -1,0 +1,90 @@
+{
+  "name": "rmsnorm",
+  "entry": "rmsnorm",
+  "card": "本机 CPU",
+  "dtype": "float32",
+  "target_ms": 0.5,
+  "budget": 8,
+  "patience": 4,
+  "repeats": 9,
+  "warmup": 3,
+  "speedup_required": 1.1,
+  "timeout_s": 30,
+  "threads": 4,
+  "bench": {
+    "args": [
+      {
+        "shape": [
+          512,
+          1024
+        ],
+        "dist": "randn",
+        "seed": 1
+      }
+    ]
+  },
+  "accuracy": [
+    {
+      "args": [
+        {
+          "shape": [
+            8,
+            32
+          ],
+          "dist": "randn",
+          "seed": 0
+        }
+      ]
+    },
+    {
+      "args": [
+        {
+          "shape": [
+            4,
+            16,
+            32
+          ],
+          "dist": "uniform",
+          "scale": 10.0,
+          "seed": 0
+        }
+      ]
+    },
+    {
+      "args": [
+        {
+          "shape": [
+            1,
+            16
+          ],
+          "dist": "constant",
+          "value": 5.0
+        }
+      ]
+    },
+    {
+      "args": [
+        {
+          "shape": [
+            2,
+            4
+          ],
+          "dist": "zeros"
+        }
+      ]
+    },
+    {
+      "args": [
+        {
+          "shape": [
+            4,
+            8
+          ],
+          "dist": "randn",
+          "seed": 2,
+          "transpose": true
+        }
+      ]
+    }
+  ]
+}

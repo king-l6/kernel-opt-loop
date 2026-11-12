@@ -322,7 +322,7 @@ python fleet.py inbox --devices cpu,cuda:0 --budget 2
 
 ## 跨运行经验：同一块卡上不从零开始
 
-单轮内循环只看得到最近几轮，换一次运行就全忘了。`memory.py` 按 `(算子, 设备)` 存一个 JSON（`memory/softmax@apple-m1.json`）：
+单轮内循环只看得到最近几轮，换一次运行就全忘了。`memory.py` 按 `(算子, 设备, 基准形状)` 存一个 JSON（`memory/softmax@apple-m1@512x1024-f32-<hash>.json`）：
 
 - `best`：上次最好的源码、耗时、相对基线加速比；
 - `lessons`：被采纳过的改法；
@@ -359,6 +359,7 @@ python fleet.py inbox --devices cpu,cuda:0 --budget 2
 
 - `--memory-dir` 指定目录；`--no-memory` 关闭（对照实验用）。
 - `fleet.py` 把记忆放在输出目录的 `_memory/` 下，按设备分开。
+- 换 shape 就是另一份记忆：`512×1024` 的最优实现不保证对 `8×32` 最优。
 - 跨卡不迁移：A100 的经验不会搬到 M1，不同卡的瓶颈不同，按 `(算子, 设备)` 隔离是刻意的。
 
 ---
@@ -437,7 +438,7 @@ traces/*        轨迹
 | 设备反馈 | 设备识别、纸面峰值、最小 I/O 有效带宽、单次 I/O 下界、缓存识别、CUDA 时钟 | 真实 DRAM 计数与 occupancy（`ncu`/CUPTI）、ROCm/Ascend 适配、按卡归一化基线、降频进采纳判定 |
 | 任务规模 | 4 个归一化算子，固定 shape | 100 算子的任务生成器：reference、随机/隐藏精度用例、shape/dtype sweep、厂商库基线（cuBLAS/cuDNN） |
 | 调度与并发 | `fleet.py`：任务 × 设备矩阵，同卡串行、跨卡并行，不可用设备跳过 | 常驻队列、远程 worker、断点续跑、按卡配额 |
-| 经验回流 | 按 `(算子, 设备)` 存 best / lessons / failures / dead_ends，下次 warm start + 注入 prompt | 加形状维度、跨卡迁移、按相关性检索排序 |
+| 经验回流 | 按 `(算子, 设备, 形状)` 存 best / lessons / failures / dead_ends，下次 warm start + 注入 prompt | 跨卡迁移、按相关性检索排序、经验过期淘汰 |
 | 成本与统计 | token 预算、单次中位数、1.1× 采纳线、CV>0.15 重测 | prompt caching、置信区间采纳、防 memoization、隐藏用例 |
 
 **关键原则不变**：Agent 负责提出和试错，scheduler 负责预算、门禁和判定。给 Agent 更多工具，不等于让它改评测。

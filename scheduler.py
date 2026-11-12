@@ -63,7 +63,7 @@ def run_schedule(
     memory_data = {}
     if memory_store is not None:
         try:
-            memory_data = memory_store.load(task.name, spec) or {}
+            memory_data = memory_store.load(task.name, spec, memory_mod.signature(task)) or {}
         except Exception:  # noqa: BLE001 - 记忆坏了不影响本次运行
             memory_data = {}
     tried[source_signature(task.source)] = 0
@@ -476,7 +476,7 @@ def _save_memory(trace: dict, memory_store, task, spec) -> dict:
     if memory_store is None:
         return trace
     try:
-        memory_store.update(task.name, spec, trace)
+        memory_store.update(task.name, spec, trace, memory_mod.signature(task))
     except Exception:  # noqa: BLE001 - 记忆写失败不能影响轨迹
         pass
     return trace

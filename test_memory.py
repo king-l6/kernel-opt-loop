@@ -1,4 +1,6 @@
-"""跨运行经验：按 (算子, 设备) 存最好版本、经验与失败，并用于 warm start。"""
+"""跨运行经验：按 (算子, 设备, 基准形状) 存最好版本、经验与失败，并用于 warm start。"""
+
+from dataclasses import replace
 
 import devices
 import memory
@@ -81,6 +83,18 @@ def test_store_roundtrip_and_summary(tmp_path):
     assert "source" not in view["best"]
 
 
+def test_different_bench_shape_has_its_own_memory(tmp_path):
+    big = replace(TASK, bench={"args": [{"shape": [512, 1024], "dist": "randn", "seed": 1}]})
+    small = replace(TASK, bench={"args": [{"shape": [8, 32], "dist": "randn", "seed": 1}]})
+    assert memory.signature(big) != memory.signature(small)
+
+    store = memory.MemoryStore(tmp_path)
+    store.update(big.name, SPEC, _trace(), memory.signature(big))
+    assert store.load(big.name, SPEC, memory.signature(big))["best"]["latency_ms"] == 0.3
+    assert store.load(small.name, SPEC, memory.signature(small)) == {}
+    assert "@512x1024-f32" in store.path(big.name, SPEC, memory.signature(big)).name
+
+
 def test_better_previous_best_is_kept(tmp_path):
     store = memory.MemoryStore(tmp_path)
     store.update("softmax", SPEC, _trace(latency=0.2))
@@ -103,10 +117,10 @@ class FakeStore:
         self.data = data
         self.saved = None
 
-    def load(self, task_name, spec):
+    def load(self, task_name, spec, shape=None):
         return self.data
 
-    def update(self, task_name, spec, trace):
+    def update(self, task_name, spec, trace, shape=None):
         self.saved = trace
         return self.data
 

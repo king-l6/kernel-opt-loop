@@ -13,6 +13,7 @@ A100 上的经验不搬到 M1 上：不同卡的瓶颈不同，跨卡迁移是�
 
 from __future__ import annotations
 
+import hashlib
 import json
 import time
 from pathlib import Path
@@ -30,19 +31,21 @@ class MemoryStore:
         self.root = Path(root)
         self.root.mkdir(parents=True, exist_ok=True)
 
-    def path(self, task_name: str, spec) -> Path:
-        name = f"{devices.slug(task_name)}@{devices.slug(spec.name)}.json"
-        return self.root / name
+    def path(self, task_name: str, spec, shape: str | None = None) -> Path:
+        parts = [devices.slug(task_name), devices.slug(spec.name)]
+        if shape:
+            parts.append(shape)
+        return self.root / ("@".join(parts) + ".json")
 
-    def load(self, task_name: str, spec) -> dict:
+    def load(self, task_name: str, spec, shape: str | None = None) -> dict:
         try:
-            data = json.loads(self.path(task_name, spec).read_text(encoding="utf-8"))
+            data = json.loads(self.path(task_name, spec, shape).read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError):
             return {}
         return data if isinstance(data, dict) else {}
 
-    def update(self, task_name: str, spec, trace: dict) -> dict:
-        data = self.load(task_name, spec)
+    def update(self, task_name: str, spec, trace: dict, shape: str | None = None) -> dict:
+        data = self.load(task_name, spec, shape)
         rounds = trace.get("rounds") or []
         metrics = trace.get("metrics") or {}
         best_name = trace.get("best")
@@ -65,6 +68,7 @@ class MemoryStore:
         data["task"] = task_name
         data["device"] = spec.name
         data["backend"] = spec.backend
+        data["shape"] = shape
         data["peak_bw_gbps"] = spec.peak_bw_gbps
         data["runs"] = int(data.get("runs") or 0) + 1
         data["updated_at"] = time.strftime("%Y-%m-%dT%H:%M:%S%z")
@@ -84,15 +88,33 @@ class MemoryStore:
         data["lessons"] = _merge(data.get("lessons"), _lessons(rounds), MAX_LESSONS)
         data["failures"] = _merge_failures(data.get("failures"), rounds)
         data["dead_ends"] = _merge(data.get("dead_ends"), _dead_ends(rounds), MAX_DEAD_ENDS)
-        self._write(task_name, spec, data)
+        self._write(task_name, spec, data, shape)
         return data
 
-    def _write(self, task_name: str, spec, data: dict) -> None:
-        path = self.path(task_name, spec)
+    def _write(self, task_name: str, spec, data: dict, shape: str | None = None) -> None:
+        path = self.path(task_name, spec, shape)
         path.parent.mkdir(parents=True, exist_ok=True)
         tmp = path.with_suffix(path.suffix + ".tmp")
         tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
         tmp.replace(path)
+
+
+def signature(task) -> str:
+    """按基准输入的形状与 dtype 区分记忆：512x1024 的最优实现不保证对 8x32 最优。"""
+    bench = getattr(task, "bench", None) or {}
+    args = bench.get("args") or ([bench] if bench else [])
+    parts = []
+    for arg in args:
+        shape = arg.get("shape") or []
+        dims = "x".join(str(int(dim)) for dim in shape) if shape else "scalar"
+        parts.append(f"{dims}-{_short_dtype(arg.get('dtype') or getattr(task, 'dtype', 'float32'))}")
+    text = "-".join(parts) or "default"
+    return f"{devices.slug(text)}-{hashlib.sha1(text.encode('utf-8')).hexdigest()[:6]}"
+
+
+def _short_dtype(dtype: str) -> str:
+    name = str(dtype).replace("torch.", "")
+    return {"float32": "f32", "float16": "f16", "bfloat16": "bf16", "float64": "f64"}.get(name, name)
 
 
 def summary(data: dict | None) -> dict | None:

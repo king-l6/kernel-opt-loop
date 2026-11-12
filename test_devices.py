@@ -99,7 +99,7 @@ def test_feedback_carries_hardware_advice():
     )
     assert feedback["hardware"]["gbps"] == 50.0
     assert "有效带宽" in feedback["text"]
-    assert any("峰值带宽" in hint for hint in feedback["hints"])
+    assert any("纸面带宽" in hint for hint in feedback["hints"])
 
 
 def test_trace_records_device_and_hardware():

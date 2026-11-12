@@ -230,7 +230,7 @@ python run.py inbox/softmax --proposer agent --budget 1 --probe-budget 1 --agent
     "gbps": 16.8,
     "bw_pct": 0.25,
     "floor_ms": 0.061,
-    "advice": ["按最小 I/O 只用到 25% 峰值带宽；先压 pass 数和中间张量…"]
+    "advice": ["按最小 I/O 用到 25% 纸面带宽（下界 0.061 ms…）；先确认是单遍融合…"]
   },
   "hints": ["先做数值稳定化：softmax/log_softmax 减最大值，norm 加 eps。"],
   "text": "结果不一致：case 2: non-finite output。先修正确性，暂不测速。"
@@ -286,7 +286,7 @@ LLM 拿到的还包括任务规格、`device_info`（实际设备与峰值）、
   "floor_ms": 0.061,
   "io_headroom": 47.2,
   "cache_resident": false,
-  "advice": ["按最小 I/O 只有 2% 峰值带宽，离下界 0.061 ms 还有 47.2×；先换成整块张量运算，避免逐行 Python 循环。"]
+  "advice": ["按最小 I/O 只有 2% 纸面带宽（下界 0.061 ms，乐观上限 47.2×，未计中间张量）。如果还有逐行循环或分离的 exp/sum/div，先融合…"]
 }
 ```
 

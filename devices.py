@@ -224,7 +224,6 @@ def describe(hardware: dict | None) -> str:
 def _advice(spec: DeviceSpec, h: dict) -> list[str]:
     pct = h["bw_pct"]
     floor = h["floor_ms"]
-    latency = h["latency_ms"]
     headroom = h["io_headroom"]
     if h["cache_resident"]:
         return [
@@ -234,18 +233,19 @@ def _advice(spec: DeviceSpec, h: dict) -> list[str]:
         ]
     if pct >= 0.6:
         return [
-            f"已用掉 {pct:.0%} 纸面带宽，离单次 I/O 下界 {floor:.3f} ms 不远；"
+            f"按最小 I/O 已用到 {pct:.0%} 纸面带宽（下界 {floor:.3f} ms）；"
             f"再快主要靠减少字节数：融合 pass、原地写、低精度、去掉中间张量。"
         ]
     if pct >= 0.2:
         return [
-            f"按最小 I/O 只用到 {pct:.0%} 峰值带宽；先压 pass 数和中间张量，"
-            f"再看访存是否合并。下界 {floor:.3f} ms，当前 {latency:.3f} ms，"
-            f"乐观上限 {headroom:.1f}×（未计中间张量）。"
+            f"按最小 I/O 用到 {pct:.0%} 纸面带宽（下界 {floor:.3f} ms，"
+            f"乐观上限 {headroom:.1f}×，未计中间张量）；先确认实现是单遍融合、"
+            f"没有额外 copy，再考虑 Triton/更大 tile。"
         ]
     return [
-        f"按最小 I/O 只有 {pct:.0%} 峰值带宽，离下界 {floor:.3f} ms 还有 {headroom:.1f}×"
-        f"（未计中间张量）；先换成整块张量运算，避免逐行 Python 循环。"
+        f"按最小 I/O 只有 {pct:.0%} 纸面带宽（下界 {floor:.3f} ms，"
+        f"乐观上限 {headroom:.1f}×，未计中间张量）。如果还有逐行循环或分离的 "
+        f"exp/sum/div，先融合；已经融合的话，剩余空间主要靠减少中间张量和 pass 数。"
     ]
 
 

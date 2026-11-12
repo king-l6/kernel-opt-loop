@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import json
 
+import devices
 from intake import load_task
 from loop import Config, replay, run
 
@@ -17,7 +18,8 @@ def main() -> None:
     parser.add_argument("--budget", type=int, help="最多消耗几个候选")
     parser.add_argument("--target", type=float, help="耗时目标（ms）")
     parser.add_argument("--out", default="traces/latest.json")
-    parser.add_argument("--device", choices=["cpu", "mps", "cuda", "auto"])
+    parser.add_argument("--device", help="cpu / mps / cuda / cuda:1 / auto")
+    parser.add_argument("--peak-bw", type=float, help="覆盖设备的纸面峰值带宽（GB/s），用于未登记的卡")
     parser.add_argument("--timeout", type=float, help="单次沙箱执行的超时秒数")
     parser.add_argument("--seed", type=int)
     parser.add_argument("--threads", type=int)
@@ -55,7 +57,11 @@ def main() -> None:
     if args.target is not None:
         config.target_ms = args.target
     if args.device is not None:
+        if args.device != "auto" and not devices.available(args.device):
+            raise SystemExit(f"设备不可用：{args.device}（不会悄悄退回 CPU，换 --device 或先确认驱动）")
         config.device = args.device
+    if args.peak_bw is not None:
+        config.peak_bw_gbps = args.peak_bw
     if args.timeout is not None:
         config.timeout_s = args.timeout
     if args.seed is not None:
@@ -95,9 +101,14 @@ def _progress(event: dict) -> None:
 
 
 def _print_table(trace: dict) -> None:
+    info = trace.get("device_info") or {}
+    peak = info.get("peak_bw_gbps")
+    device = info.get("name") or trace["device"]
+    if peak:
+        device += f" ({peak:.0f} GB/s)"
     print(
         f"{trace['reference_file']}  {trace['card']}  "
-        f"shape={tuple(trace['shape'])}  device={trace['device']}  "
+        f"shape={tuple(trace['shape'])}  device={device}  "
         f"proposer={trace.get('proposer')}"
     )
     print(f"{'round':<6}{'name':<18}{'status':<18}{'latency_ms':>12}{'speedup':>9}  message")

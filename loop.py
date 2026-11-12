@@ -32,6 +32,7 @@ class Config:
     agent_steps: int = 8
     probe_budget: int = 6
     device: str = "cpu"
+    peak_bw_gbps: float | None = None
     seed: int = 0
     temperature: float = 0.7
     triton_ready: bool = False

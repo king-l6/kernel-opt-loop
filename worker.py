@@ -49,14 +49,24 @@ class _Primitives:
         self.dtype = torch.Tensor.dtype.__get__
         self.perf_counter = time.perf_counter
         self.inference_mode = torch.inference_mode
+        self.clock = None
         if torch.cuda.is_available():
             self.cuda_event = torch.cuda.Event
             self.cuda_sync = torch.cuda.synchronize
+            self.clock = getattr(torch.cuda, "clock_rate", None)
         else:
             self.cuda_event = None
             self.cuda_sync = None
         mps = getattr(torch, "mps", None)
         self.mps_sync = getattr(mps, "synchronize", None)
+
+    def clock_mhz(self):
+        if self.clock is None:
+            return None
+        try:
+            return _FLOAT(self.clock())
+        except Exception:
+            return None
 
     def sync(self, device) -> None:
         if device.type == "cuda" and self.cuda_sync is not None:
@@ -143,6 +153,15 @@ def execute(job: dict) -> dict:
         bench_args = _make_args(torch, job.get("bench", {}), device, int(job.get("seed", 1)))
     except Exception as exc:  # noqa: BLE001
         return _fail("crash", f"bad bench case: {exc}", "input")
+    # 访存字节数也在这里算：用参考实现在基准输入上的输出，不依赖候选代码，
+    # 候选改写 torch 也改不到这个数。
+    io_bytes = None
+    try:
+        bench_golden = ref_fn(*bench_args)
+        io_bytes = _io_bytes(torch, bench_args, bench_golden)
+        del bench_golden
+    except Exception:  # noqa: BLE001 - 基准输入跑不动就只少一个统计量
+        io_bytes = None
 
     primitives = _Primitives(torch)
 
@@ -154,7 +173,10 @@ def execute(job: dict) -> dict:
     if accuracy["status"] != "ok":
         return accuracy
 
+    clock_before = primitives.clock_mhz()
     latency, stats = _bench(primitives, fn, bench_args, job, device)
+    clock_after = primitives.clock_mhz()
+    clocks = _clocks(clock_before, clock_after)
     profile = None
     if job.get("profile"):
         profile = _profile(
@@ -171,6 +193,8 @@ def execute(job: dict) -> dict:
         device=device.type,
         max_abs_err=accuracy.get("max_abs_err"),
         max_rel_err=accuracy.get("max_rel_err"),
+        io_bytes=io_bytes,
+        clocks=clocks,
     )
 
 
@@ -322,6 +346,45 @@ def _make_args(torch, case: dict, device, seed: int):
     return args
 
 
+def _io_bytes(torch, args, out) -> int | None:
+    """最小 I/O：输入 + 输出各算一遍，同一个张量对象只算一次。
+
+    这是下界，不是真实 DRAM 流量：中间张量、多 pass 的读写都不在这里。
+    """
+    seen: set[int] = set()
+    total = _collect_bytes(torch, args, seen, 0)
+    total += _collect_bytes(torch, out, seen, 0)
+    return total or None
+
+
+def _collect_bytes(torch, obj, seen: set[int], depth: int) -> int:
+    if depth > 4:
+        return 0
+    if isinstance(obj, torch.Tensor):
+        if id(obj) in seen:
+            return 0
+        seen.add(id(obj))
+        try:
+            return _INT(obj.numel()) * _INT(obj.element_size())
+        except Exception:
+            return 0
+    if isinstance(obj, (list, tuple)):
+        return sum(_collect_bytes(torch, item, seen, depth + 1) for item in obj)
+    if isinstance(obj, dict):
+        return sum(_collect_bytes(torch, item, seen, depth + 1) for item in obj.values())
+    return 0
+
+
+def _clocks(before, after):
+    if not before or not after:
+        return None
+    return {
+        "before_mhz": before,
+        "after_mhz": after,
+        "drop_pct": max(0.0, (before - after) / before * 100.0),
+    }
+
+
 def _bench(primitives: "_Primitives", fn, args, job: dict, device):
     p = primitives
     warmup = _INT(job.get("warmup", 3))
@@ -443,6 +506,8 @@ def _ok(**kwargs) -> dict:
         "profile": None,
         "device": "cpu",
         "error_kind": "",
+        "io_bytes": None,
+        "clocks": None,
     }
     base.update(kwargs)
     return base
@@ -459,6 +524,8 @@ def _fail(status: str, message: str, kind: str, **extra) -> dict:
         "profile": None,
         "device": "cpu",
         "error_kind": kind,
+        "io_bytes": None,
+        "clocks": None,
     }
     base.update(extra)
     return base

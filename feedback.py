@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import devices
+
 
 def make_feedback(
     *,
@@ -18,13 +20,24 @@ def make_feedback(
     tried: list | None = None,
     history: list | None = None,
     round_no: int = 0,
+    hardware: dict | None = None,
 ) -> dict:
     profile = profile or []
     tried = tried or []
     history = history or []
+    hardware = hardware or {}
     speedup_best = _ratio(best_ms, latency_ms)
     speedup_base = _ratio(baseline_ms, latency_ms)
-    hints = _hints(status, error_kind, message, speedup_best, speedup_required, profile, target_ms)
+    hints = _hints(
+        status,
+        error_kind,
+        message,
+        speedup_best,
+        speedup_required,
+        profile,
+        target_ms,
+        hardware,
+    )
     feedback = {
         "round": round_no,
         "status": status,
@@ -42,6 +55,7 @@ def make_feedback(
         "tried": tried,
         "history": history,
         "hints": hints,
+        "hardware": hardware,
     }
     feedback["text"] = _text(feedback)
     return feedback
@@ -77,6 +91,9 @@ def _text(feedback: dict) -> str:
         if feedback["profile"]:
             top = feedback["profile"][0]
             text += f"最耗时的是 {top['name']}（{top.get('pct', 0):.0f}%）。"
+        hardware_text = devices.describe(feedback.get("hardware"))
+        if hardware_text:
+            text += hardware_text
         return text
     if status == "compile_error":
         return f"编译没过：{message}。先修到能加载。"
@@ -97,16 +114,23 @@ def _text(feedback: dict) -> str:
         if feedback["candidate_profile"]:
             top = feedback["candidate_profile"][0]
             text += f"现在最耗时的是 {top['name']}（{top.get('pct', 0):.0f}%）。"
+        hardware_text = devices.describe(feedback.get("hardware"))
+        if hardware_text:
+            text += hardware_text
         return text
     if status == "rejected_slower":
-        return (
+        text = (
             f"结果一致，耗时 {_ms(latency)}，没超过当前最好 {_ms(best)}"
             f"（需要快 {feedback['speedup_required']:.1f}×）。"
         )
+        hardware_text = devices.describe(feedback.get("hardware"))
+        if hardware_text:
+            text += hardware_text
+        return text
     return message
 
 
-def _hints(status, error_kind, message, speedup_best, required, profile, target) -> list[str]:
+def _hints(status, error_kind, message, speedup_best, required, profile, target, hardware=None) -> list[str]:
     hints: list[str] = []
     if status == "compile_error":
         if error_kind == "syntax":
@@ -137,6 +161,9 @@ def _hints(status, error_kind, message, speedup_best, required, profile, target)
     if profile:
         top = profile[0]
         hints.append(f"当前最优的瓶颈是 {top['name']}（{top.get('pct', 0):.0f}%）。")
+    for item in (hardware or {}).get("advice") or []:
+        if item not in hints:
+            hints.append(item)
     return hints
 
 

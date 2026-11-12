@@ -13,6 +13,7 @@ from __future__ import annotations
 
 from typing import Callable
 
+import devices
 from policy import check_source
 from proposers import source_signature
 
@@ -33,9 +34,11 @@ class ProbeSession:
         runner,
         config,
         on_event: Callable[[dict], None] | None = None,
+        spec=None,
     ) -> None:
         self.task = task
         self.runner = runner
+        self.spec = spec or devices.spec_for(task, config)
         self.limit = max(0, int(getattr(config, "probe_budget", 0) or 0))
         self.used = 0
         self.cache: dict[str, dict] = {}
@@ -67,6 +70,8 @@ class ProbeSession:
         self.used += 1
         label = f"{name}-{self.used}"
         result = self.runner.check(label, source, profile=bool(profile))
+        io_bytes = getattr(result, "io_bytes", None)
+        hardware = devices.analyze(self.spec, result.latency_ms, io_bytes)
         payload = {
             "status": result.status,
             "message": result.message,
@@ -78,6 +83,8 @@ class ProbeSession:
             "error_kind": result.error_kind,
             "stderr": _tail(result.stderr),
             "device": result.device,
+            "io_bytes": io_bytes,
+            "hardware": hardware,
             "profile_requested": bool(profile),
             "probe_left": self.left,
             "cached": False,
@@ -102,6 +109,7 @@ class ProbeSession:
                     "speedup_vs_baseline": None,
                     "best_ms": self.best_ms,
                     "error_kind": payload.get("error_kind", ""),
+                    "gbps": (payload.get("hardware") or {}).get("gbps"),
                 }
             )
         except Exception:  # noqa: BLE001 - 进度展示是旁路
@@ -119,6 +127,8 @@ class ProbeSession:
             "error_kind": error_kind,
             "stderr": "",
             "device": "",
+            "io_bytes": None,
+            "hardware": None,
             "profile_requested": False,
             "probe_left": self.left,
             "cached": False,

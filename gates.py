@@ -22,6 +22,8 @@ class Eval:
     error_kind: str = ""
     device: str = "cpu"
     threads: int | None = None
+    io_bytes: int | None = None
+    clocks: dict | None = None
     wall_s: float = 0.0
     exit_code: int | None = None
     stderr: str = ""
@@ -40,6 +42,8 @@ class Eval:
             error_kind=data.get("error_kind", "") or ("sandbox" if result.timed_out else ""),
             device=data.get("device", "cpu"),
             threads=data.get("threads"),
+            io_bytes=data.get("io_bytes"),
+            clocks=data.get("clocks"),
             wall_s=result.wall_s,
             exit_code=result.exit_code,
             stderr=result.stderr,

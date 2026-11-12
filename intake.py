@@ -36,6 +36,7 @@ class Task:
     dtype: str = "float32"
     seed: int = 0
     temperature: float = 0.7
+    device_spec: dict = field(default_factory=dict)
     extras: dict = field(default_factory=dict)
 
     @property
@@ -54,6 +55,8 @@ class Task:
             "name": self.name,
             "entry": self.entry,
             "dtype": self.dtype,
+            "card": self.card,
+            "device_spec": self.device_spec,
             "accuracy_shapes": _shapes(self.accuracy),
             "bench_shapes": _shapes([self.bench]),
             "target_ms": self.target_ms,
@@ -116,6 +119,7 @@ def load_task(path: str | Path) -> Task:
         dtype=dtype,
         seed=int(spec.get("seed", 0)),
         temperature=float(spec.get("temperature", 0.7)),
+        device_spec=dict(spec.get("device_spec") or {}),
         extras={key: value for key, value in spec.items() if key not in _KNOWN_KEYS},
     )
 
@@ -202,4 +206,5 @@ _KNOWN_KEYS = {
     "probe_budget",
     "seed",
     "temperature",
+    "device_spec",
 }

@@ -2,7 +2,7 @@
 
 一个能在本机跑完的**算子优化 Agent 实验台**。
 
-Agent 每轮拿到一份结构化反馈：上一轮的门禁结果、人类可读的一句话、当前最优源码与 profile、已尝试过的候选摘要。它可以在受限预算内先**试跑**候选、读完整错误和 profile，再交回下一版源码；源码先过静态策略，再进子进程沙箱，按「编译 → 精度 → 测速」三道门判定。只有**正确且比当前最好快 1.1×** 的版本才会替换最优；低于目标、预算用完、连续多轮没提升就停。每一轮的源码、门禁结果、反馈和 profile 都写进轨迹，可以重放核对。
+Agent 每轮拿到一份结构化反馈：上一轮的门禁结果、人类可读的一句话、当前最优源码与 profile、已尝试过的候选摘要。它可以在受限预算内先**试跑**候选、读完整错误和 profile，再交回下一版源码；源码先过静态策略，再进子进程沙箱，按「编译 → 精度 → 测速」三道门判定。只有**正确且比当前最好快 1.1×** 的版本才会替换最优；低于目标、预算用完、连续多轮没提升就停。每一轮的源码、门禁结果、反馈、profile 和设备带宽都写进轨迹，可以重放核对。
 
 这台机器没有加速卡，默认在 CPU 上测；设备、线程数、超时、预算都在任务里声明。CUDA/Triton 的候选目录已经写好，换到有卡的机器上会自动进入候选。
 
@@ -25,6 +25,9 @@ Agent 每轮拿到一份结构化反馈：上一轮的门禁结果、人类可�
 ## 架构
 
 ```
+fleet.py ──────────── 任务 × 设备矩阵（同卡串行、跨卡并行，不可用设备跳过）
+        │
+        ▼
 inbox/<task>/
 ├── task.json          # 入口、输入形状、精度用例、目标、预算
 └── reference.py       # 算法同学给的参考实现（对照 + 基线）
@@ -49,6 +52,9 @@ inbox/<task>/
         │
         ▼
  worker.py ─────────── compile → accuracy（多组边界输入）→ benchmark（p50/p90/CV）→ profile
+        │              （同时回报最小 I/O 字节数、CUDA 时钟）
+        ▼
+ devices.py ────────── 认出这块卡、纸面峰值、有效带宽、单次 I/O 下界
         │
         ▼
  traces/*.json ─────── replay / report / serve
@@ -80,6 +86,9 @@ python run.py --replay traces/latest.json
 # 4. 本地控制台（可发起真实运行、实时看逐轮门禁、随时停止）
 python serve.py
 # 浏览器打开 http://127.0.0.1:8765/web/
+
+# 5. 把任务集铺到多块设备上（同卡串行、跨卡并行）
+python fleet.py inbox --devices cpu,cuda:0 --budget 2
 ```
 
 ### 接真实 LLM
@@ -177,6 +186,10 @@ python run.py inbox/softmax --proposer agent --budget 1 --probe-budget 1 --agent
   "threads": 4,
   "agent_steps": 8,
   "probe_budget": 6,
+  "device_spec": {
+    "name": "Apple M1",
+    "peak_bw_gbps": 68.25
+  },
   "bench": {
     "args": [{"shape": [512, 1024], "dist": "randn", "seed": 1}]
   },
@@ -212,12 +225,19 @@ python run.py inbox/softmax --proposer agent --budget 1 --probe-budget 1 --agent
   "speedup_vs_best": null,
   "tried": ["broken_syntax", "wrong_axis", "unstable"],
   "profile": [{"name": "aten::exp", "us": 812.0, "pct": 62.0}],
+  "hardware": {
+    "device": "Apple M1",
+    "gbps": 16.8,
+    "bw_pct": 0.25,
+    "floor_ms": 0.061,
+    "advice": ["按最小 I/O 只用到 25% 峰值带宽；先压 pass 数和中间张量…"]
+  },
   "hints": ["先做数值稳定化：softmax/log_softmax 减最大值，norm 加 eps。"],
   "text": "结果不一致：case 2: non-finite output。先修正确性，暂不测速。"
 }
 ```
 
-LLM 拿到的还包括任务规格、`reference_source`、当前最优源码和最近 6 轮摘要；**不塞全量历史**，避免上下文膨胀。
+LLM 拿到的还包括任务规格、`device_info`（实际设备与峰值）、`reference_source`、当前最优源码和最近 6 轮摘要；**不塞全量历史**，避免上下文膨胀。
 
 ---
 
@@ -250,6 +270,52 @@ LLM 拿到的还包括任务规格、`reference_source`、当前最优源码和�
 
 ---
 
+## 设备反馈：不只是「快了几毫秒」
+
+同一份算子在不同卡上的瓶颈不同，所以每轮反馈里都带一份设备视图：
+
+```json
+{
+  "device": "Apple M1",
+  "backend": "cpu",
+  "peak_bw_gbps": 68.25,
+  "peak_source": "spec",
+  "io_bytes": 4194304,
+  "gbps": 1.447,
+  "bw_pct": 0.021,
+  "floor_ms": 0.061,
+  "io_headroom": 47.2,
+  "cache_resident": false,
+  "advice": ["按最小 I/O 只有 2% 峰值带宽，离下界 0.061 ms 还有 47.2×；先换成整块张量运算，避免逐行 Python 循环。"]
+}
+```
+
+- **设备是谁**：CUDA 从 `torch.cuda.get_device_properties` 取名称、SM 数、算力、显存；CPU/MPS 取芯片型号。纸面峰值来自 `devices.py` 的规格表，命中不了就返回 `null`，不猜。
+- **有效带宽**：子进程在候选执行前，用参考实现在基准输入上算一遍输出，得到「输入 + 输出」的最小 I/O 字节数；`io_bytes / 延迟` 就是有效带宽。这个数由父进程决定，候选改写 torch 也改不到。
+- **单次 I/O 下界**：`io_bytes / 纸面峰值`。这是**乐观下界**——多 pass 的中间张量没算进去，所以它是「理论上最快能到多少」，不是「利用率」。
+- **缓存识别**：小 shape 下算出的带宽可能超过 DRAM 峰值（数据落在缓存里），这时标记 `cache_resident`，并提示换更大的 shape 或看 profiler 的实际访存计数。
+- **CUDA 时钟**：测速前后各采一次 SM 时钟，降频超过 10% 会体现在 `clocks.drop_pct` 里。
+
+未登记的卡可以在 `task.json` 写 `device_spec`，或运行时加 `--peak-bw`：
+
+```bash
+python run.py inbox/softmax --device cuda:0 --peak-bw 1555
+```
+
+显式指定的设备不可用时会直接报错，不会悄悄退回 CPU——否则「在 A100 上跑过」的结论会被 CPU 数字污染。
+
+反馈里的 `advice` 会直接进下一轮 prompt，Agent 因此能区分「还没写向量化」和「已经贴着带宽下界、只能减少字节数」这两种情况。
+
+多设备用 `fleet.py`：同一块卡上的任务串行（并发会互相抢带宽），不同卡之间并行；显式指定的设备不可用时跳过并记录，不会悄悄退回 CPU。
+
+```bash
+python fleet.py inbox --devices cpu,cuda:0 --budget 2
+# task            cpu:Apple M1 68GB/s      cuda:0:不可用
+# softmax                   7.47x ✓                  跳过
+```
+
+---
+
 ## 指标与可复现
 
 ```bash
@@ -263,7 +329,7 @@ python report.py traces/suite
 - `experiments_per_success`、`tokens_per_success`：单位成功成本；
 - `accept_rate`：候选被采纳比例。
 
-`run.py --replay` 不追求延迟小数点一致，而是核对**每轮的正确性判定**是否仍成立，并对超过 3× 的延迟漂移给警告。轨迹里带环境指纹：Python/torch/numpy 版本、平台、CPU 数、torch 线程数、git sha。
+`run.py --replay` 不追求延迟小数点一致，而是核对**每轮的正确性判定**是否仍成立，并对超过 3× 的延迟漂移给警告。轨迹里带环境指纹：Python/torch/numpy 版本、平台、CPU 数、torch 线程数、git sha；`device_info` 记录实际设备名和纸面峰值，避免把不同卡的加速比混在一起比较。
 
 ---
 
@@ -291,6 +357,7 @@ gates.py        Runner 与 Eval
 feedback.py     结构化反馈 + 一句话
 proposers.py    ScriptedProposer / LLMProposer / AgentProposer / LLMClient
 probes.py       Agent 的试跑工具（独立预算 + AST 缓存）
+devices.py      设备识别、纸面峰值、有效带宽、单次 I/O 下界
 catalogs.py     离线候选目录
 scheduler.py    门禁顺序、预算、采纳、停止、轨迹记录
 trace.py        环境指纹与落盘
@@ -298,10 +365,13 @@ loop.py         Config / run / replay
 metrics.py      指标
 report.py       轨迹汇总 CLI
 suite.py        任务集 CLI
+fleet.py        任务 × 设备矩阵 CLI
 run.py          单任务 CLI
 serve.py        本地控制台 + 只读 API
 web/index.html  控制台页面
 test_agent.py   Agent 工具循环与试跑预算的测试
+test_devices.py 设备识别与带宽下界的测试
+test_fleet.py   多设备矩阵的测试
 inbox/*         任务
 traces/*        轨迹
 ```
@@ -315,15 +385,15 @@ traces/*        轨迹
 | 层 | 现在 | 下一步 |
 |---|---|---|
 | 生成与验证 | Agent 可试跑、看 profile、再提交；门禁不可绕过 | 原生 tool-use / 多文件编辑；编译错误全文回传；失败方向作为下一轮硬约束 |
-| 设备反馈 | `torch.profiler` 的 self time、p50/p90/CV、设备/线程指纹 | `DeviceAdapter`：CUDA 接 `ncu`/CUPTI（SM 利用率、occupancy、访存、stall、寄存器压力），Ascend/ROCm 接各自 profiler；按卡归一化基线 |
+| 设备反馈 | 设备识别、纸面峰值、最小 I/O 有效带宽、单次 I/O 下界、缓存识别、CUDA 时钟 | 真实 DRAM 计数与 occupancy（`ncu`/CUPTI）、ROCm/Ascend 适配、按卡归一化基线、降频进采纳判定 |
 | 任务规模 | 4 个归一化算子，固定 shape | 100 算子的任务生成器：reference、随机/隐藏精度用例、shape/dtype sweep、厂商库基线（cuBLAS/cuDNN） |
-| 调度与并发 | 单机单进程，一次一个运行 | 任务队列 + 每卡 worker + 任务×设备矩阵；失败重试与设备隔离 |
+| 调度与并发 | `fleet.py`：任务 × 设备矩阵，同卡串行、跨卡并行，不可用设备跳过 | 常驻队列、远程 worker、断点续跑、按卡配额 |
 | 经验回流 | 当前最优 + 最近 6 轮摘要 | 按 `(算子, 设备架构, 形状)` 存成功技巧/失败模式，检索进 prompt；跨任务迁移 |
 | 成本与统计 | token 预算、单次中位数、1.1× 采纳线 | prompt caching、噪声感知采纳（CV/置信区间）、防 memoization、隐藏用例 |
 
 **关键原则不变**：Agent 负责提出和试错，scheduler 负责预算、门禁和判定。给 Agent 更多工具，不等于让它改评测。
 
-已知限制：单机内存态运行记录、进程级沙箱（不是容器）、CUDA/Triton 路径需要在有卡机器上验收、真实模型的动作协议目前是 JSON 而不是原生 tool call。
+已知限制：设备反馈用的是纸面峰值和「最小 I/O」下界，不是硬件计数器，所以小 shape 会命中缓存、多 pass 会被低估；单机内存态运行记录、进程级沙箱（不是容器）、CUDA/Triton 路径需要在有卡机器上验收、真实模型的动作协议目前是 JSON 而不是原生 tool call。
 
 ---
 

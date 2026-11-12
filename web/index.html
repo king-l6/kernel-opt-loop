@@ -466,6 +466,7 @@
         <div class="card ${met ? "good" : "warn"}"><div class="k">最优</div><div class="v">${m.best_ms == null ? "-" : Number(m.best_ms).toFixed(3)} <small>ms</small></div></div>
         <div class="card ${met ? "good" : m.best_ms == null ? "bad" : "warn"}"><div class="k">总加速</div><div class="v">${speedup == null ? "-" : speedup.toFixed(2) + " <small>×</small>"}</div></div>
         <div class="card ${met === true ? "good" : met === false ? "bad" : ""}"><div class="k">目标</div><div class="v">${m.target_ms == null ? "未设" : Number(m.target_ms).toFixed(3) + " <small>ms</small>"} <small>${met === true ? "✓ 达标" : met === false ? "未达标" : ""}</small></div></div>
+        ${deviceCard(trace)}
         <div class="card"><div class="k">轮次 / 实验</div><div class="v">${m.rounds ?? "-"} <small>/ ${m.experiments ?? "-"}</small></div></div>
         ${m.probes ? `<div class="card"><div class="k">试跑</div><div class="v">${m.probes} <small>次</small></div></div>` : ""}
         ${m.tokens ? `<div class="card"><div class="k">token 用量</div><div class="v">${Number(m.tokens).toLocaleString()} <small>tokens</small></div></div>` : ""}
@@ -516,6 +517,7 @@
             ${round.speedup_vs_baseline == null ? "" : `<span class="chip ok">${Number(round.speedup_vs_baseline).toFixed(2)}× 基线</span>`}
             ${round.speedup_vs_best == null ? "" : `<span class="chip warn">${Number(round.speedup_vs_best).toFixed(2)}× 当前最优</span>`}
             ${round.max_abs_err == null ? "" : `<span class="chip">max_abs_err ${Number(round.max_abs_err).toExponential(2)}</span>`}
+            ${bandwidthChip(round.hardware)}
           </div>
         </div>
         <div class="steps">
@@ -701,6 +703,22 @@
 
     function ms(value) {
       return `${Number(value).toFixed(3)} ms`;
+    }
+
+    function deviceCard(trace) {
+      const info = trace.device_info || {};
+      const name = info.name || trace.device || "-";
+      const peak = info.peak_bw_gbps == null ? "" : ` <small>${Number(info.peak_bw_gbps).toFixed(0)} GB/s</small>`;
+      const backend = info.backend ? `<small>${esc(info.backend)}</small>` : "";
+      return `<div class="card"><div class="k">设备</div><div class="v" style="font-size:15px">${esc(name)}${peak} ${backend}</div></div>`;
+    }
+
+    function bandwidthChip(hardware) {
+      if (!hardware || hardware.gbps == null) return "";
+      const parts = [`${Number(hardware.gbps).toFixed(1)} GB/s`];
+      if (hardware.bw_pct != null) parts.push(`${(Number(hardware.bw_pct) * 100).toFixed(0)}% 峰值`);
+      if (hardware.floor_ms != null) parts.push(`I/O 下界 ${Number(hardware.floor_ms).toFixed(3)} ms`);
+      return `<span class="chip">${esc(parts.join(" · "))}</span>`;
     }
 
     function esc(value) {

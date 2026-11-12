@@ -12,6 +12,7 @@ from __future__ import annotations
 import time
 from dataclasses import asdict, dataclass, is_dataclass
 
+import devices
 from feedback import compact_history, make_feedback
 from policy import check_source
 from probes import ProbeSession
@@ -37,13 +38,19 @@ def run_schedule(task, proposer, runner, config, env: dict | None = None, on_rou
     stop_reason = ""
     batch_id = 0
     empty_streak = 0
-    probes = ProbeSession(task, runner, config, on_event=on_round)
 
     baseline = runner.check("baseline", task.source, profile=True)
     if baseline.status != "ok":
         raise RuntimeError(f"baseline failed: {baseline.message}")
     baseline_ms = best_ms = baseline.latency_ms
     best_profile = baseline.profile or []
+    # 设备描述跟着实际跑的那块卡走：要了 cuda 但只有 cpu 时，反馈里不能写显卡。
+    spec = devices.spec_for(task, config)
+    actual_device = getattr(baseline, "device", "") or ""
+    if actual_device and actual_device != spec.backend:
+        spec = devices.spec_for(task, config, actual_device)
+    best_hardware = devices.analyze(spec, baseline_ms, getattr(baseline, "io_bytes", None))
+    probes = ProbeSession(task, runner, config, on_event=on_round, spec=spec)
     tried[source_signature(task.source)] = 0
     feedback = make_feedback(
         status="baseline",
@@ -57,6 +64,7 @@ def run_schedule(task, proposer, runner, config, env: dict | None = None, on_rou
         tried=[],
         history=[],
         round_no=0,
+        hardware=best_hardware,
     )
     baseline_record = _record(
         round_no=0,
@@ -77,13 +85,14 @@ def run_schedule(task, proposer, runner, config, env: dict | None = None, on_rou
         batch=None,
         batch_index=0,
         started=started,
+        hardware=best_hardware,
     )
     history.append(baseline_record)
     _notify(on_round, baseline_record)
 
     if _under_target(best_ms, getattr(config, "target_ms", None)):
         stop, stop_reason = _hit_target(best_ms, config.target_ms), "target"
-        return _trace(task, config, history, best_name, best_source, best_ms, baseline_ms, accepted, experiments, evaluations, tokens, stop, stop_reason, env, started, probes.used)
+        return _trace(task, config, history, best_name, best_source, best_ms, baseline_ms, accepted, experiments, evaluations, tokens, stop, stop_reason, env, started, probes.used, spec)
 
     while experiments < getattr(config, "budget", 8):
         if getattr(config, "max_tokens", None) and tokens >= int(config.max_tokens):
@@ -108,6 +117,8 @@ def run_schedule(task, proposer, runner, config, env: dict | None = None, on_rou
             "budget_left": max(0, int(getattr(config, "budget", 8)) - experiments),
             "best_of": int(getattr(config, "best_of", 1)),
             "device": str(getattr(config, "device", "cpu")),
+            "device_info": spec.as_dict(),
+            "hardware": best_hardware,
             "triton_ready": bool(getattr(config, "triton_ready", False)),
         }
         probes.best_ms = best_ms
@@ -157,20 +168,30 @@ def run_schedule(task, proposer, runner, config, env: dict | None = None, on_rou
                     config,
                     runner,
                 )
+            latency = (
+                eval_result.latency_ms
+                if eval_result is not None and status in {"accepted", "rejected_slower"}
+                else None
+            )
+            hardware = (
+                devices.analyze(
+                    spec,
+                    eval_result.latency_ms,
+                    getattr(eval_result, "io_bytes", None),
+                )
+                if eval_result is not None and eval_result.latency_ms is not None
+                else None
+            )
             if status == "accepted":
                 accepted += 1
                 best_name = patch.name
                 best_source = patch.source or best_source
                 best_ms = eval_result.latency_ms
                 best_profile = candidate_profile or best_profile
+                best_hardware = hardware or best_hardware
                 patience = 0
             else:
                 patience += 1
-            latency = (
-                eval_result.latency_ms
-                if eval_result is not None and status in {"accepted", "rejected_slower"}
-                else None
-            )
             outcome = make_feedback(
                 status=status,
                 message=message,
@@ -185,6 +206,7 @@ def run_schedule(task, proposer, runner, config, env: dict | None = None, on_rou
                 tried=tried_names[-12:],
                 history=compact_history(history, 6),
                 round_no=round_no,
+                hardware=hardware,
             )
             record = _record(
                 round_no=round_no,
@@ -207,6 +229,7 @@ def run_schedule(task, proposer, runner, config, env: dict | None = None, on_rou
                 started=round_started,
                 tokens=patch.usage,
                 agent=patch.meta,
+                hardware=hardware,
             )
             history.append(record)
             _notify(on_round, record)
@@ -242,6 +265,7 @@ def run_schedule(task, proposer, runner, config, env: dict | None = None, on_rou
         env,
         started,
         probes.used,
+        spec,
     )
 
 
@@ -308,6 +332,7 @@ def _notify(on_round, record: dict) -> None:
                 "speedup_vs_baseline": record["speedup_vs_baseline"],
                 "best_ms": record["best_ms"],
                 "error_kind": record["error_kind"],
+                "gbps": (record.get("hardware") or {}).get("gbps"),
             }
         )
     except Exception:  # noqa: BLE001 - 进度展示是旁路
@@ -372,6 +397,7 @@ def _record(
     started,
     tokens=None,
     agent=None,
+    hardware=None,
 ):
     latency = (
         eval_result.latency_ms
@@ -399,6 +425,8 @@ def _record(
         "error_kind": getattr(eval_result, "error_kind", "") if eval_result is not None else outcome_feedback.get("error_kind", ""),
         "device": getattr(eval_result, "device", "") if eval_result is not None else "",
         "threads": getattr(eval_result, "threads", None) if eval_result is not None else None,
+        "hardware": hardware or {},
+        "clocks": getattr(eval_result, "clocks", None) if eval_result is not None else None,
         "wall_s": getattr(eval_result, "wall_s", 0.0) if eval_result is not None else 0.0,
         "tokens": tokens or {},
         "agent": agent or {},
@@ -537,6 +565,7 @@ def _trace(
     env,
     started,
     probes=0,
+    spec=None,
 ) -> dict:
     speedup = _ratio(baseline_ms, best_ms)
     return {
@@ -549,6 +578,7 @@ def _trace(
         "shape": task.shape,
         "target_ms": getattr(config, "target_ms", None),
         "device": str(getattr(config, "device", "cpu")),
+        "device_info": spec.as_dict() if spec is not None else {},
         "config": _config_dict(config),
         "env": env or {},
         "proposer": getattr(config, "proposer_label", None),

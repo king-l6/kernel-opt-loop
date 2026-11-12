@@ -18,6 +18,56 @@ import time
 import traceback
 
 
+# 门禁自己用的原语在模块加载时抓一份。候选代码可以改写 torch 的模块函数或
+# Tensor 的描述符（例如 torch.allclose = lambda *a: True），但改不到这些引用。
+_SORTED = sorted
+_FMEAN = statistics.fmean
+_PSTDEV = statistics.pstdev
+_CEIL = math.ceil
+_FLOAT = float
+_INT = int
+_LEN = len
+_RANGE = range
+
+
+class _Primitives:
+    """候选代码执行前抓取的门禁原语，判定与测速都只走这份引用。"""
+
+    def __init__(self, torch) -> None:
+        self.tensor = torch.Tensor
+        self.allclose = torch.allclose
+        self.isfinite = torch.isfinite
+        self.all = torch.all
+        self.sub = torch.sub
+        self.div = torch.div
+        self.abs = torch.abs
+        self.max = torch.max
+        self.clamp_min = torch.clamp_min
+        self.item = torch.Tensor.item
+        self.numel = torch.Tensor.numel
+        self.shape = torch.Tensor.shape.__get__
+        self.dtype = torch.Tensor.dtype.__get__
+        self.perf_counter = time.perf_counter
+        self.inference_mode = torch.inference_mode
+        if torch.cuda.is_available():
+            self.cuda_event = torch.cuda.Event
+            self.cuda_sync = torch.cuda.synchronize
+        else:
+            self.cuda_event = None
+            self.cuda_sync = None
+        mps = getattr(torch, "mps", None)
+        self.mps_sync = getattr(mps, "synchronize", None)
+
+    def sync(self, device) -> None:
+        if device.type == "cuda" and self.cuda_sync is not None:
+            self.cuda_sync()
+        elif device.type == "mps" and self.mps_sync is not None:
+            try:
+                self.mps_sync()
+            except Exception:
+                pass
+
+
 def main() -> None:
     if len(sys.argv) != 3:
         raise SystemExit("usage: worker.py JOB OUT")
@@ -74,21 +124,43 @@ def execute(job: dict) -> dict:
     if ref_fn is None:
         return _fail("crash", f"reference load failed: {err}", kind)
 
+    # 输入和参考输出都在候选代码执行前算好；否则候选可以改写 torch 的
+    # 全局函数，让参考实现也按它的方式算，再骗过精度门。
+    inputs: list[list] = []
+    goldens: list = []
+    for index, case in enumerate(job.get("accuracy") or []):
+        try:
+            args = _make_args(torch, case, device, int(case.get("seed", index)))
+        except Exception as exc:  # noqa: BLE001
+            return _fail("crash", f"bad accuracy case {index}: {exc}", "input")
+        try:
+            golden = ref_fn(*args)
+        except Exception as exc:  # noqa: BLE001
+            return _fail("crash", f"reference failed on case {index}: {exc}", "reference")
+        inputs.append(args)
+        goldens.append(golden)
+    try:
+        bench_args = _make_args(torch, job.get("bench", {}), device, int(job.get("seed", 1)))
+    except Exception as exc:  # noqa: BLE001
+        return _fail("crash", f"bad bench case: {exc}", "input")
+
+    primitives = _Primitives(torch)
+
     fn, kind, err = _load(torch, source, entry, "<candidate>")
     if fn is None:
         return _fail("compile_error", err, kind)
 
-    accuracy = _check_accuracy(torch, fn, ref_fn, job, device)
+    accuracy = _check_accuracy(primitives, fn, inputs, goldens, job)
     if accuracy["status"] != "ok":
         return accuracy
 
-    latency, stats = _bench(torch, fn, job, device)
+    latency, stats = _bench(primitives, fn, bench_args, job, device)
     profile = None
     if job.get("profile"):
         profile = _profile(
             torch,
             fn,
-            _make_args(torch, job.get("bench", {}), device, int(job.get("seed", 1))),
+            bench_args,
             device,
             int(job.get("profile_limit", 5)),
         )
@@ -125,79 +197,77 @@ def _load(torch, source: str, entry: str, filename: str):
     return fn, "", ""
 
 
-def _check_accuracy(torch, fn, ref_fn, job: dict, device) -> dict:
-    rtol = float(job.get("rtol", 1e-4))
-    atol = float(job.get("atol", 1e-5))
+def _check_accuracy(primitives: "_Primitives", fn, inputs, goldens, job: dict) -> dict:
+    p = primitives
+    rtol = _FLOAT(job.get("rtol", 1e-4))
+    atol = _FLOAT(job.get("atol", 1e-5))
     max_abs = 0.0
     max_rel = 0.0
-    cases = job.get("accuracy") or []
-    with torch.inference_mode():
-        for index, case in enumerate(cases):
-            try:
-                args = _make_args(torch, case, device, int(case.get("seed", index)))
-            except Exception as exc:
-                return _fail("crash", f"bad accuracy case {index}: {exc}", "input")
-            try:
-                golden = ref_fn(*args)
-            except Exception as exc:
-                return _fail("crash", f"reference failed on case {index}: {exc}", "reference")
-            try:
-                out = fn(*args)
-            except Exception as exc:
-                return _fail(
-                    "accuracy_fail",
-                    f"case {index}: {type(exc).__name__}: {exc}",
-                    "runtime",
-                    max_abs_err=_num(max_abs),
-                    max_rel_err=_num(max_rel),
-                )
-            if not isinstance(out, torch.Tensor):
-                return _fail(
-                    "accuracy_fail",
-                    f"case {index}: returned {type(out).__name__}, not a Tensor",
-                    "interface",
-                    max_abs_err=_num(max_abs),
-                    max_rel_err=_num(max_rel),
-                )
-            if out.shape != golden.shape:
-                return _fail(
-                    "accuracy_fail",
-                    f"case {index}: shape {tuple(out.shape)} != {tuple(golden.shape)}",
-                    "shape",
-                    max_abs_err=_num(max_abs),
-                    max_rel_err=_num(max_rel),
-                )
-            if out.dtype != golden.dtype:
-                return _fail(
-                    "accuracy_fail",
-                    f"case {index}: dtype {out.dtype} != {golden.dtype}",
-                    "dtype",
-                    max_abs_err=_num(max_abs),
-                    max_rel_err=_num(max_rel),
-                )
-            finite = bool(torch.isfinite(out).all().item())
-            if not finite:
-                return _fail(
-                    "accuracy_fail",
-                    f"case {index}: non-finite output",
-                    "non_finite",
-                    max_abs_err=_num(max_abs),
-                    max_rel_err=_num(max_rel),
-                )
-            diff = (out - golden).abs()
-            abs_err = float(diff.max().item()) if diff.numel() else 0.0
-            denom = golden.abs().clamp_min(1e-12)
-            rel_err = float((diff / denom).max().item()) if diff.numel() else 0.0
-            max_abs = max(max_abs, abs_err)
-            max_rel = max(max_rel, rel_err)
-            if not bool(torch.allclose(out, golden, rtol=rtol, atol=atol)):
-                return _fail(
-                    "accuracy_fail",
-                    f"case {index}: max_abs_err={abs_err:.3e}, max_rel_err={rel_err:.3e}",
-                    "mismatch",
-                    max_abs_err=_num(max_abs),
-                    max_rel_err=_num(max_rel),
-                )
+    for index, (args, golden) in enumerate(zip(inputs, goldens)):
+        try:
+            out = fn(*args)
+        except Exception as exc:  # noqa: BLE001
+            return _fail(
+                "accuracy_fail",
+                f"case {index}: {type(exc).__name__}: {exc}",
+                "runtime",
+                max_abs_err=_num(max_abs),
+                max_rel_err=_num(max_rel),
+            )
+        if type(out) is not p.tensor:
+            return _fail(
+                "accuracy_fail",
+                f"case {index}: returned {type(out).__name__}, not a Tensor",
+                "interface",
+                max_abs_err=_num(max_abs),
+                max_rel_err=_num(max_rel),
+            )
+        out_shape = tuple(p.shape(out))
+        golden_shape = tuple(p.shape(golden))
+        if out_shape != golden_shape:
+            return _fail(
+                "accuracy_fail",
+                f"case {index}: shape {out_shape} != {golden_shape}",
+                "shape",
+                max_abs_err=_num(max_abs),
+                max_rel_err=_num(max_rel),
+            )
+        if p.dtype(out) != p.dtype(golden):
+            return _fail(
+                "accuracy_fail",
+                f"case {index}: dtype {p.dtype(out)} != {p.dtype(golden)}",
+                "dtype",
+                max_abs_err=_num(max_abs),
+                max_rel_err=_num(max_rel),
+            )
+        if not p.item(p.all(p.isfinite(out))):
+            return _fail(
+                "accuracy_fail",
+                f"case {index}: non-finite output",
+                "non_finite",
+                max_abs_err=_num(max_abs),
+                max_rel_err=_num(max_rel),
+            )
+        diff = p.abs(p.sub(out, golden))
+        if p.numel(diff):
+            abs_err = _FLOAT(p.item(p.max(diff)))
+            denom = p.clamp_min(p.abs(golden), 1e-12)
+            rel_err = _FLOAT(p.item(p.max(p.div(diff, denom))))
+        else:
+            abs_err = 0.0
+            rel_err = 0.0
+        if abs_err > max_abs:
+            max_abs = abs_err
+        if rel_err > max_rel:
+            max_rel = rel_err
+        if not p.allclose(out, golden, rtol=rtol, atol=atol):
+            return _fail(
+                "accuracy_fail",
+                f"case {index}: max_abs_err={abs_err:.3e}, max_rel_err={rel_err:.3e}",
+                "mismatch",
+                max_abs_err=_num(max_abs),
+                max_rel_err=_num(max_rel),
+            )
     return {
         "status": "ok",
         "message": "accuracy passed",
@@ -206,7 +276,7 @@ def _check_accuracy(torch, fn, ref_fn, job: dict, device) -> dict:
         "latency_ms": None,
         "stats": None,
         "profile": None,
-        "device": device.type,
+        "device": "",
         "error_kind": "",
     }
 
@@ -252,43 +322,44 @@ def _make_args(torch, case: dict, device, seed: int):
     return args
 
 
-def _bench(torch, fn, job: dict, device):
-    args = _make_args(torch, job.get("bench", {}), device, int(job.get("seed", 1)))
-    warmup = int(job.get("warmup", 3))
-    repeats = int(job.get("repeats", 9))
-    with torch.inference_mode():
-        for _ in range(warmup):
+def _bench(primitives: "_Primitives", fn, args, job: dict, device):
+    p = primitives
+    warmup = _INT(job.get("warmup", 3))
+    repeats = _INT(job.get("repeats", 9))
+    with p.inference_mode():
+        for _ in _RANGE(warmup):
             fn(*args)
-        _sync(torch, device)
+        p.sync(device)
         samples = []
         cuda = device.type == "cuda"
-        for _ in range(repeats):
+        for _ in _RANGE(repeats):
             if cuda:
-                start = torch.cuda.Event(enable_timing=True)
-                end = torch.cuda.Event(enable_timing=True)
+                start = p.cuda_event(enable_timing=True)
+                end = p.cuda_event(enable_timing=True)
                 start.record()
                 fn(*args)
                 end.record()
-                torch.cuda.synchronize()
-                samples.append(float(start.elapsed_time(end)))
+                p.cuda_sync()
+                samples.append(_FLOAT(start.elapsed_time(end)))
             else:
-                begin = time.perf_counter()
+                begin = p.perf_counter()
                 fn(*args)
-                _sync(torch, device)
-                samples.append((time.perf_counter() - begin) * 1000.0)
-    samples.sort()
-    median = samples[len(samples) // 2]
-    mean = statistics.fmean(samples)
-    stdev = statistics.pstdev(samples) if len(samples) > 1 else 0.0
+                p.sync(device)
+                samples.append((p.perf_counter() - begin) * 1000.0)
+    samples = _SORTED(samples)
+    total = _LEN(samples)
+    median = samples[total // 2]
+    mean = _FMEAN(samples)
+    stdev = _PSTDEV(samples) if total > 1 else 0.0
     return median, {
         "p50_ms": median,
-        "p90_ms": samples[min(len(samples) - 1, int(math.ceil(0.9 * len(samples))) - 1)],
+        "p90_ms": samples[min(total - 1, _CEIL(0.9 * total) - 1)],
         "min_ms": samples[0],
         "max_ms": samples[-1],
         "mean_ms": mean,
         "stdev_ms": stdev,
         "cv": (stdev / mean) if mean else None,
-        "samples": len(samples),
+        "samples": total,
     }
 
 

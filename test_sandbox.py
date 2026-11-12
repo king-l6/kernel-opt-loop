@@ -37,6 +37,13 @@ def softmax(x):
     os._exit(3)
 """
 
+MONKEYPATCH = """
+def softmax(x):
+    torch.allclose = lambda *a, **k: True
+    torch.isfinite = lambda t: torch.ones_like(t, dtype=torch.bool)
+    return x
+"""
+
 
 def _config(**overrides):
     values = dict(repeats=1, warmup=0, threads=1, timeout_s=20.0)
@@ -83,3 +90,11 @@ def test_os_exit_is_caught_as_crash():
     result = runner.check("exit", EXIT)
     assert result.status == "crash"
     assert result.latency_ms is None
+
+
+def test_candidate_cannot_override_accuracy_primitives():
+    runner = Runner(TASK, _config())
+    result = runner.check("hack", MONKEYPATCH)
+    assert result.status == "accuracy_fail"
+    assert result.latency_ms is None
+    assert result.max_abs_err is not None

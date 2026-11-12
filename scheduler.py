@@ -35,6 +35,7 @@ def run_schedule(task, proposer, runner, config, env: dict | None = None, on_rou
     stop = ""
     stop_reason = ""
     batch_id = 0
+    empty_streak = 0
 
     baseline = runner.check("baseline", task.source, profile=True)
     if baseline.status != "ok":
@@ -116,9 +117,16 @@ def run_schedule(task, proposer, runner, config, env: dict | None = None, on_rou
             break
         if not batch:
             reason = getattr(proposer, "last_error", "") or "没有给出下一版"
+            kind = getattr(proposer, "last_error_kind", "")
+            # 网关 5xx / 超时 / 响应格式错误是临时故障：连续两次才终止，
+            # 不能因为一次网络抖动就放弃整个实验。模型主动放弃（declined）仍然立即停。
+            if kind in {"transient", "parse"} and empty_streak < 2:
+                empty_streak += 1
+                continue
             stop = f"{reason}。当前最好是 {best_ms:.3f} ms。"
-            stop_reason = "no_proposal"
+            stop_reason = "proposer_error" if kind in {"transient", "parse"} else "no_proposal"
             break
+        empty_streak = 0
 
         batch_id += 1
         for index, raw in enumerate(batch):

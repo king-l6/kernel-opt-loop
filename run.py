@@ -84,6 +84,10 @@ def main() -> None:
     print(f"trace: {args.out}")
 
 
+def _progress(event: dict) -> None:
+    print("PROGRESS " + json.dumps(event, ensure_ascii=False), flush=True)
+
+
 def _print_table(trace: dict) -> None:
     print(
         f"{trace['reference_file']}  {trace['card']}  "

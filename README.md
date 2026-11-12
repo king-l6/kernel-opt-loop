@@ -75,7 +75,7 @@ python report.py traces/suite
 # 3. 重放一条轨迹，核对正确性判定
 python run.py --replay traces/latest.json
 
-# 4. 讲解页
+# 4. 本地控制台（可发起真实运行、实时看逐轮门禁、随时停止）
 python serve.py
 # 浏览器打开 http://127.0.0.1:8765/web/
 ```
@@ -107,6 +107,29 @@ python run.py inbox/softmax --proposer scripted   # 强制离线
 ```
 
 `--best-of 3` 会并行生成 3 个候选，串行评测，避免并行测速互相污染。
+
+### 网页控制台
+
+`python serve.py` 只绑 `127.0.0.1`，页面可以：
+
+- 选任务、生成器、best-of、预算，发起一次真实运行；
+- 每轮结束时通过 `--progress` 的 `PROGRESS` 行实时更新轮次、门禁状态和耗时；
+- 运行中随时停止（`SIGTERM` 整个进程组，3 秒后 `SIGKILL`），已停止的运行会标记为 `cancelled`；
+- 结束后自动加载轨迹，看每轮步骤、profile、候选源码和与 `reference.py` 的 diff；
+- 「最近的运行」保留本次服务启动后的运行记录（包括失败和已停止的），历史轨迹按任务取最新一条汇总。
+
+对应的 HTTP 接口：
+
+| 方法 | 路径 | 作用 |
+|---|---|---|
+| `GET` | `/api/tasks` | 任务列表与 LLM 可用性 |
+| `GET` | `/api/traces` | 轨迹列表 |
+| `GET` | `/api/loop/run?path=…&diff=1` | 读一条轨迹，附带 diff |
+| `GET` | `/api/report` | 每个任务最新轨迹的汇总 |
+| `POST` | `/api/run` | 启动运行 `{task, proposer, best_of, budget}` |
+| `GET` | `/api/run?id=…` | 轮询运行状态、日志、逐轮进度 |
+| `POST` | `/api/run/stop` | 停止运行 `{id}` |
+| `GET` | `/api/runs` | 本次服务启动后的运行记录 |
 
 ---
 
@@ -245,8 +268,8 @@ metrics.py      指标
 report.py       轨迹汇总 CLI
 suite.py        任务集 CLI
 run.py          单任务 CLI
-serve.py        讲解页与只读 API
-web/index.html  讲解页
+serve.py        本地控制台 + 只读 API
+web/index.html  控制台页面
 inbox/*         任务
 traces/*        轨迹
 ```

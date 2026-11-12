@@ -74,7 +74,11 @@ class ScriptedProposer:
 
 
 class LLMError(RuntimeError):
-    pass
+    """kind: transient（5xx/429/超时，可重试）/ parse（响应格式）/ fatal（配置或鉴权）"""
+
+    def __init__(self, message: str, kind: str = "fatal"):
+        super().__init__(message)
+        self.kind = kind
 
 
 @dataclass
@@ -91,12 +95,17 @@ class LLMClient:
         api_key: str | None = None,
         model: str | None = None,
         timeout: float = 120.0,
-        retries: int = 2,
+        retries: int = 3,
     ):
         self.provider = (provider or os.environ.get("KOPT_LLM_PROVIDER") or "").lower()
         if not self.provider:
             self.provider = "anthropic" if os.environ.get("ANTHROPIC_API_KEY") else "openai"
         self.base_url = (base_url or os.environ.get("KOPT_LLM_BASE_URL") or "").rstrip("/")
+        # 兼容 Claude Code 常见的内网网关配置：ANTHROPIC_BASE_URL / OPENAI_BASE_URL
+        if not self.base_url and self.provider == "anthropic":
+            self.base_url = (os.environ.get("ANTHROPIC_BASE_URL") or "").rstrip("/")
+        if not self.base_url and self.provider != "anthropic":
+            self.base_url = (os.environ.get("OPENAI_BASE_URL") or "").rstrip("/")
         if not self.base_url:
             self.base_url = (
                 "https://api.anthropic.com"
@@ -135,16 +144,23 @@ class LLMClient:
                 )
                 with urllib.request.urlopen(request, timeout=self.timeout) as response:
                     body = response.read().decode("utf-8", errors="replace")
-                return self._parse(body)
+                try:
+                    return self._parse(body)
+                except (ValueError, KeyError, IndexError, TypeError) as exc:
+                    raise LLMError(f"响应解析失败：{exc}", "parse") from exc
             except urllib.error.HTTPError as exc:
                 detail = exc.read().decode("utf-8", errors="replace")[:800]
-                last_error = LLMError(f"HTTP {exc.code}: {detail}")
-                if exc.code not in {408, 409, 429, 500, 502, 503, 504}:
+                transient = exc.code in {408, 409, 429, 500, 502, 503, 504}
+                last_error = LLMError(
+                    f"HTTP {exc.code}: {detail}",
+                    "transient" if transient else "fatal",
+                )
+                if not transient:
                     break
             except (urllib.error.URLError, TimeoutError, OSError) as exc:
-                last_error = LLMError(f"连接失败：{exc}")
+                last_error = LLMError(f"连接失败：{exc}", "transient")
             if attempt < self.retries:
-                time.sleep(1.5 * (attempt + 1))
+                time.sleep(min(2 ** attempt, 8))
         raise last_error or LLMError("LLM 调用失败")
 
     def _url(self) -> str:
@@ -246,9 +262,11 @@ class LLMProposer:
         self.max_tokens = max_tokens
         self.repair_retries = repair_retries
         self.last_error: str = ""
+        self.last_error_kind: str = ""
 
     def propose(self, ctx: dict, n: int = 1) -> list[Patch]:
         self.last_error = ""
+        self.last_error_kind = ""
         messages = build_messages(ctx, self.entry)
         workers = max(1, min(n, 4))
         with ThreadPoolExecutor(max_workers=workers) as pool:
@@ -265,6 +283,8 @@ class LLMProposer:
             patches.append(patch)
         if not patches and any(item is None for item in results) and not self.last_error:
             self.last_error = "模型没有返回可解析的 JSON，或主动放弃"
+        if not patches and not self.last_error_kind:
+            self.last_error_kind = "parse"
         return patches
 
     def _one(self, messages: list[dict], index: int, ctx: dict) -> Patch | None:
@@ -278,11 +298,13 @@ class LLMProposer:
                 )
             except LLMError as exc:
                 self.last_error = str(exc)
+                self.last_error_kind = getattr(exc, "kind", "fatal")
                 return None
             try:
                 data = _extract_json(completion.text)
             except ValueError as exc:
                 self.last_error = f"JSON 解析失败：{exc}"
+                self.last_error_kind = "parse"
                 if attempt < self.repair_retries:
                     attempt_messages = messages + [
                         {"role": "assistant", "content": completion.text[:2000]},
@@ -294,9 +316,11 @@ class LLMProposer:
             hypothesis = str(data.get("hypothesis") or "")
             if source is None:
                 self.last_error = f"模型放弃：{hypothesis}"
+                self.last_error_kind = "declined"
                 return None
             if not isinstance(source, str):
                 self.last_error = "source 不是字符串"
+                self.last_error_kind = "parse"
                 return None
             round_no = ctx.get("round", 0)
             title = _short_title(hypothesis) or f"LLM 第 {round_no} 轮"

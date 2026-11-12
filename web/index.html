@@ -3,266 +3,704 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>适配台</title>
+  <title>适配台 · kernel-opt-loop</title>
   <style>
     :root {
-      --bg: #f6f7f8;
+      --bg: #f4f6f8;
       --surface: #fff;
-      --ink: #28292c;
-      --text2: #646c7a;
-      --text3: #9499a0;
-      --line: #e3e8ec;
+      --ink: #24262b;
+      --text2: #5f6774;
+      --text3: #949aa4;
+      --line: #e2e7ec;
       --blue: #00aeec;
+      --blue-dark: #0095c9;
       --blue-thin: rgba(0, 174, 236, 0.12);
       --green: #129643;
-      --red: #f85a54;
-      --red-thin: rgba(248, 90, 84, 0.1);
-      --track: #eef0f2;
-      --radius: 8px;
+      --green-thin: rgba(18, 150, 67, 0.1);
+      --red: #e5484d;
+      --red-thin: rgba(229, 72, 77, 0.1);
+      --amber: #b26a00;
+      --amber-thin: rgba(178, 106, 0, 0.1);
+      --track: #edf0f3;
+      --radius: 10px;
+      --mono: "SF Mono", "JetBrains Mono", Menlo, Consolas, monospace;
     }
     * { box-sizing: border-box; }
-    html, body { margin: 0; height: 100%; }
+    html, body { margin: 0; }
     body {
-      background: var(--bg);
-      color: var(--ink);
-      font-family: "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", "Segoe UI", sans-serif;
-      font-size: 14px;
-      line-height: 1.5;
+      background: var(--bg); color: var(--ink);
+      font: 14px/1.55 "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", "Segoe UI", sans-serif;
     }
-    button { font: inherit; }
-    button:focus-visible { outline: 2px solid var(--blue); outline-offset: 2px; }
-    .shell { min-height: 100vh; display: grid; grid-template-columns: 250px minmax(0, 1fr); }
-    .sider {
-      position: sticky; top: 0; height: 100vh;
-      display: flex; flex-direction: column;
-      background: var(--surface); border-right: 1px solid var(--line);
+    button, input, select { font: inherit; color: inherit; }
+    button:focus-visible, input:focus-visible, select:focus-visible { outline: 2px solid var(--blue); outline-offset: 2px; }
+    .topbar {
+      position: sticky; top: 0; z-index: 20;
+      display: flex; align-items: center; gap: 16px; flex-wrap: wrap;
+      padding: 12px 20px; background: rgba(255,255,255,.94);
+      border-bottom: 1px solid var(--line); backdrop-filter: blur(8px);
     }
-    .brand { height: 56px; display: flex; align-items: center; padding: 0 18px; font-size: 16px; font-weight: 700; }
-    .group { margin: 4px 16px 6px; color: var(--text3); font-size: 12px; }
-    .rounds { overflow: auto; padding: 0 10px 16px; display: flex; flex-direction: column; gap: 2px; }
+    .brand { font-size: 17px; font-weight: 750; letter-spacing: .2px; white-space: nowrap; }
+    .brand small { color: var(--text3); font-weight: 500; font-size: 12px; margin-left: 6px; }
+    .controls { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-left: auto; }
+    .field { display: grid; gap: 3px; }
+    .field span { color: var(--text3); font-size: 11px; }
+    .field select, .field input {
+      height: 34px; padding: 0 10px; border: 1px solid var(--line); border-radius: 8px;
+      background: var(--surface); min-width: 110px;
+    }
+    .field input { width: 92px; }
+    .btn {
+      height: 36px; padding: 0 16px; border: 1px solid var(--line); border-radius: 8px;
+      background: var(--surface); cursor: pointer; white-space: nowrap;
+    }
+    .btn:hover { border-color: #c9d1d9; }
+    .btn.primary { background: var(--blue); border-color: var(--blue); color: #fff; font-weight: 650; }
+    .btn.primary:hover { background: var(--blue-dark); }
+    .btn:disabled { opacity: .5; cursor: default; }
+    .status { min-width: 0; color: var(--text2); font-size: 13px; }
+    .status b { font-weight: 650; }
+    main { padding: 18px 20px 48px; max-width: 1400px; margin: 0 auto; }
+    .cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 10px; margin-bottom: 16px; }
+    .card { background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius); padding: 12px 14px; }
+    .card .k { color: var(--text3); font-size: 12px; margin-bottom: 2px; }
+    .card .v { font-size: 20px; font-weight: 720; font-variant-numeric: tabular-nums; }
+    .card .v small { font-size: 13px; font-weight: 500; color: var(--text2); }
+    .card.good .v { color: var(--green); }
+    .card.bad .v { color: var(--red); }
+    .card.warn .v { color: var(--amber); }
+    .workspace { display: grid; grid-template-columns: 290px minmax(0, 1fr); gap: 14px; align-items: start; }
+    .panel { background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius); }
+    .timeline { padding: 8px; position: sticky; top: 76px; max-height: calc(100vh - 96px); overflow: auto; }
+    .timeline h3, .detail h3, .console h3, .report h3 { margin: 0; font-size: 13px; color: var(--text2); font-weight: 650; }
+    .timeline h3 { padding: 6px 8px 8px; }
     .round {
-      display: flex; justify-content: space-between; gap: 8px;
-      width: 100%; text-align: left; border: 0; background: transparent;
-      color: var(--ink); border-radius: var(--radius); padding: 9px 10px; cursor: pointer;
+      display: grid; grid-template-columns: 22px minmax(0,1fr) auto; gap: 8px; align-items: center;
+      width: 100%; text-align: left; border: 0; background: transparent; border-radius: 8px;
+      padding: 8px; cursor: pointer;
     }
     .round:hover { background: var(--bg); }
-    .round[aria-current="true"] { background: var(--blue-thin); color: var(--blue); }
-    .round b { font-weight: 600; }
-    .round small { color: var(--text3); font-size: 12px; white-space: nowrap; }
-    .round[aria-current="true"] small { color: var(--blue); }
-    .stage { min-width: 0; padding: 16px 20px 32px; }
-    .head { display: flex; justify-content: space-between; gap: 16px; align-items: flex-end; margin-bottom: 8px; }
-    .meta { margin: 0; color: var(--text2); font-size: 13px; }
-    h1 { margin: 4px 0 0; font-size: 20px; }
+    .round[aria-current="true"] { background: var(--blue-thin); }
+    .round.inflight { opacity: .85; }
+    .dot { width: 9px; height: 9px; border-radius: 99px; background: var(--blue); }
+    .dot.pass, .dot.accepted, .dot.baseline { background: var(--green); }
+    .dot.fail, .dot.compile_error, .dot.accuracy_fail, .dot.policy_error, .dot.timeout, .dot.crash, .dot.duplicate { background: var(--red); }
+    .dot.rejected_slower { background: var(--amber); }
+    .round .t { min-width: 0; }
+    .round .t b { display: block; font-weight: 600; font-size: 13px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .round .t small { color: var(--text3); font-size: 11px; }
+    .round .r { text-align: right; font-variant-numeric: tabular-nums; font-size: 12px; color: var(--text2); white-space: nowrap; }
+    .detail { min-height: 320px; }
+    .detail-head { padding: 16px 20px 12px; border-bottom: 1px solid var(--line); }
+    .detail-head h2 { margin: 0 0 4px; font-size: 18px; }
+    .detail-head p { margin: 0; color: var(--text2); font-size: 13px; }
+    .chips { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin-top: 10px; }
     .chip {
-      height: 28px; display: inline-flex; align-items: center; padding: 0 10px;
-      border-radius: 999px; background: var(--surface); border: 1px solid var(--line);
-      font-variant-numeric: tabular-nums; font-weight: 650; white-space: nowrap;
+      display: inline-flex; align-items: center; height: 26px; padding: 0 10px;
+      border-radius: 999px; border: 1px solid var(--line); background: var(--surface);
+      font-size: 12px; font-weight: 650; font-variant-numeric: tabular-nums;
     }
-    .chip.bad { color: var(--red); border-color: #f6d2d0; background: var(--red-thin); }
-    .chip.ok { color: var(--green); border-color: #cde9d8; background: rgba(18, 150, 67, 0.1); }
-    .chip.warn { color: #b26a00; border-color: #f0dcc0; background: rgba(178, 106, 0, 0.1); }
-    .chips { display: flex; gap: 8px; align-items: center; }
-    .tracebar {
-      margin: 0 14px 8px; height: 32px; padding: 0 8px;
-      border: 1px solid var(--line); border-radius: var(--radius);
-      background: var(--surface); color: var(--ink); font: inherit;
-    }
-    .log { margin-top: 16px; background: var(--surface); border-radius: var(--radius); padding: 8px 0; }
-    .step { display: grid; grid-template-columns: 28px minmax(0, 1fr); padding: 0 22px; }
+    .chip.ok { color: var(--green); border-color: #cde9d8; background: var(--green-thin); }
+    .chip.bad { color: var(--red); border-color: #f3cfd0; background: var(--red-thin); }
+    .chip.warn { color: var(--amber); border-color: #efdcc1; background: var(--amber-thin); }
+    .steps { padding: 6px 20px 18px; }
+    .step { display: grid; grid-template-columns: 24px minmax(0,1fr); }
     .spine { position: relative; }
-    .spine::before { content: ""; position: absolute; left: 5px; top: 16px; bottom: -8px; width: 1px; background: var(--line); }
+    .spine::before { content: ""; position: absolute; left: 4px; top: 14px; bottom: -6px; width: 1px; background: var(--line); }
     .step:last-child .spine::before { display: none; }
-    .dot { width: 11px; height: 11px; border-radius: 99px; margin-top: 16px; background: var(--blue); position: relative; z-index: 1; }
-    .dot.fail { background: var(--red); }
-    .dot.pass { background: var(--green); }
-    .dot.skip { background: #c9ccd0; }
-    .body { padding: 12px 0 14px; border-bottom: 1px solid #f1f2f3; }
+    .step .dot { margin-top: 14px; }
+    .step .body { padding: 11px 0 12px; border-bottom: 1px solid #f2f4f5; }
     .step:last-child .body { border-bottom: 0; }
-    .body h2 { margin: 0; font-size: 14px; }
-    .body p { margin: 6px 0 0; color: var(--text2); max-width: 78ch; }
-    .meters { margin-top: 12px; display: grid; gap: 8px; }
-    .meter { display: grid; grid-template-columns: minmax(120px, 220px) 1fr 72px; gap: 10px; align-items: center; }
-    .meter b { font-size: 13px; font-weight: 600; }
+    .step h4 { margin: 0; font-size: 13.5px; }
+    .step p { margin: 4px 0 0; color: var(--text2); max-width: 82ch; }
+    .meters { margin-top: 10px; display: grid; gap: 7px; }
+    .meter { display: grid; grid-template-columns: minmax(120px, 200px) 1fr 76px; gap: 10px; align-items: center; }
+    .meter b { font-size: 12px; font-weight: 600; overflow: hidden; text-overflow: ellipsis; }
     .track { height: 6px; border-radius: 99px; background: var(--track); overflow: hidden; }
     .fill { height: 100%; border-radius: 99px; background: var(--blue); }
-    .vals { text-align: right; font-variant-numeric: tabular-nums; font-size: 12px; color: var(--text2); }
-    .actions { display: flex; gap: 8px; margin-top: 16px; }
-    .btn { height: 36px; padding: 0 16px; border-radius: var(--radius); border: 1px solid var(--line); background: var(--surface); cursor: pointer; }
-    .btn:disabled { color: var(--text3); cursor: default; }
-    .btn.primary { background: var(--blue); border-color: var(--blue); color: #fff; }
-    .btn.primary:disabled { background: rgba(0, 174, 236, 0.45); border-color: transparent; }
-    .load { padding: 32px; }
-    @media (max-width: 800px) {
-      .shell { grid-template-columns: 1fr; }
-      .sider { position: static; height: auto; border-right: 0; border-bottom: 1px solid var(--line); }
-      .rounds { flex-direction: row; overflow-x: auto; }
-      .round { width: auto; flex: none; }
-      .meter { grid-template-columns: 1fr; }
+    .vals { text-align: right; font-variant-numeric: tabular-nums; font-size: 11px; color: var(--text2); }
+    .tabs { display: flex; gap: 6px; padding: 0 20px; border-bottom: 1px solid var(--line); }
+    .tab { border: 0; background: transparent; padding: 10px 12px; cursor: pointer; color: var(--text2); border-bottom: 2px solid transparent; }
+    .tab[aria-selected="true"] { color: var(--blue); border-bottom-color: var(--blue); font-weight: 650; }
+    .code-wrap { padding: 12px 20px 18px; }
+    pre.code {
+      margin: 0; padding: 14px; border-radius: 8px; background: #1f2227; color: #e6e8eb;
+      font: 12.5px/1.6 var(--mono); overflow: auto; max-height: 460px;
+    }
+    pre.code .add { color: #8ee08e; }
+    pre.code .del { color: #ff9b9b; }
+    pre.code .hunk { color: #7cc7ff; }
+    pre.code .head { color: #aab3bf; }
+    .console { margin-top: 16px; overflow: hidden; }
+    .console-head { display: flex; justify-content: space-between; align-items: center; padding: 12px 16px; border-bottom: 1px solid var(--line); }
+    .console pre {
+      margin: 0; padding: 14px 16px; max-height: 320px; overflow: auto;
+      background: #1f2227; color: #d7dbe0; font: 12px/1.65 var(--mono); white-space: pre-wrap; word-break: break-word;
+    }
+    .console pre .ok { color: #8ee08e; }
+    .console pre .bad { color: #ff9b9b; }
+    .runs { margin-top: 16px; padding: 16px; }
+    .runs-list { display: grid; gap: 8px; margin-top: 12px; }
+    .run-item {
+      display: grid; grid-template-columns: 10px minmax(0,1fr) auto auto; gap: 10px; align-items: center;
+      width: 100%; padding: 9px 12px; border: 1px solid var(--line); border-radius: 8px;
+      background: var(--surface); text-align: left; cursor: pointer;
+    }
+    .run-item:hover { border-color: var(--blue); }
+    .run-item .meta { min-width: 0; }
+    .run-item .meta b { display: block; font-size: 13px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .run-item .meta small { color: var(--text3); font-size: 11px; }
+    .run-item .state { font-size: 12px; font-weight: 650; color: var(--text2); }
+    .run-item .state.done { color: var(--green); }
+    .run-item .state.error { color: var(--red); }
+    .run-item .state.running { color: var(--blue); }
+    .dot.cancelled { background: var(--text3); }
+    .report { margin-top: 16px; padding: 16px; }
+    .report-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(190px, 1fr)); gap: 10px; margin-top: 12px; }
+    .tcard { border: 1px solid var(--line); border-radius: 8px; padding: 10px 12px; cursor: pointer; background: var(--surface); text-align: left; }
+    .tcard:hover { border-color: var(--blue); }
+    .tcard b { display: block; font-size: 13px; }
+    .tcard .big { font-size: 20px; font-weight: 720; font-variant-numeric: tabular-nums; margin: 3px 0; }
+    .tcard small { color: var(--text3); }
+    .empty { padding: 40px 20px; color: var(--text3); text-align: center; }
+    .error { margin: 14px 20px; padding: 10px 12px; border-radius: 8px; background: var(--red-thin); color: var(--red); }
+    @media (max-width: 900px) {
+      .workspace { grid-template-columns: 1fr; }
+      .timeline { position: static; max-height: none; }
+      .controls { margin-left: 0; }
     }
   </style>
 </head>
 <body>
-  <p class="load" id="load">正在读取这一次运行。</p>
-  <div class="shell" id="app" hidden></div>
+  <header class="topbar">
+    <div class="brand">适配台 <small>kernel-opt-loop</small></div>
+    <div class="controls">
+      <label class="field"><span>任务</span><select id="task"></select></label>
+      <label class="field"><span>生成器</span>
+        <select id="proposer">
+          <option value="scripted">离线候选目录</option>
+          <option value="auto">自动（有 key 走 LLM）</option>
+          <option value="llm">LLM</option>
+        </select>
+      </label>
+      <label class="field"><span>best-of</span>
+        <select id="bestof"><option>1</option><option>2</option><option>3</option></select>
+      </label>
+      <label class="field"><span>预算</span><input id="budget" type="number" min="1" max="50" placeholder="默认"></label>
+      <button class="btn primary" id="runbtn" type="button">开始运行</button>
+      <button class="btn" id="stopbtn" type="button" hidden>停止</button>
+      <span class="status" id="status">正在读取…</span>
+    </div>
+  </header>
+
+  <main>
+    <section class="cards" id="cards"></section>
+
+    <section class="workspace">
+      <aside class="panel timeline" id="timeline"><div class="empty">还没有轮次</div></aside>
+      <div class="panel detail" id="detail"><div class="empty">选一个任务，点「开始运行」；或从下方选一条历史轨迹。</div></div>
+    </section>
+
+    <section class="panel console" id="console" hidden>
+      <div class="console-head"><h3>运行日志</h3><span class="status" id="console-meta"></span></div>
+      <pre id="log"></pre>
+    </section>
+
+    <section class="panel runs" id="runs">
+      <h3>最近的运行</h3>
+      <div class="runs-list" id="runs-list"></div>
+    </section>
+
+    <section class="panel report" id="report">
+      <h3>历史轨迹</h3>
+      <div class="report-grid" id="report-grid"></div>
+    </section>
+  </main>
+
   <script>
     const LABELS = {
-      baseline: "基线",
-      accepted: "采纳",
-      rejected_slower: "更慢",
-      compile_error: "编译失败",
-      accuracy_fail: "精度失败",
-      timeout: "超时",
-      crash: "崩溃",
-      policy_error: "策略拒绝",
-      duplicate: "重复",
-    }
-    let run = null
-    let index = 0
-    let traces = []
+      baseline: "基线", accepted: "采纳", rejected_slower: "更慢",
+      compile_error: "编译失败", accuracy_fail: "精度失败", timeout: "超时",
+      crash: "崩溃", policy_error: "策略拒绝", duplicate: "重复",
+    };
+    const STOP_LABELS = {
+      target: "达标停止", budget: "预算用完", patience: "连续无提升",
+      no_proposal: "模型放弃", proposer_error: "生成器故障",
+      token_budget: "token 预算用完",
+    };
+    const state = { tasks: [], traces: [], runs: [], trace: null, index: 0, run: null, poll: null, tab: "source" };
 
-    load()
+    boot();
 
-    async function load() {
+    async function boot() {
+      bind();
       try {
-        const [list, body] = await Promise.all([api("/api/traces"), api("/api/loop/run")])
-        traces = list.data || []
-        show(body.data)
+        const [tasks, traces, runs, latest] = await Promise.all([
+          api("/api/tasks"), api("/api/traces"), api("/api/runs"), api("/api/loop/run?diff=1"),
+        ]);
+        state.tasks = tasks.data.tasks || [];
+        state.traces = traces.data || [];
+        state.runs = runs.data || [];
+        fillTasks(tasks.data);
+        fillTraces(traces.data);
+        renderRuns();
+        showTrace(latest.data);
+        setStatus("就绪");
       } catch (error) {
-        document.getElementById("load").textContent = error.message || "没有读到运行记录"
+        setStatus("读取失败");
+        document.getElementById("detail").innerHTML = `<div class="error">${esc(error.message)}</div>`;
       }
     }
 
-    async function api(url) {
-      const res = await fetch(url)
-      const body = await res.json()
-      if (body.code !== 0) throw new Error(body.message || "读取失败")
-      return body
+    function bind() {
+      document.getElementById("runbtn").addEventListener("click", startRun);
+      document.getElementById("stopbtn").addEventListener("click", stopRun);
+      document.getElementById("task").addEventListener("change", () => {
+        const task = state.tasks.find((item) => item.name === document.getElementById("task").value);
+        if (!task) return;
+        document.getElementById("budget").placeholder = `默认 ${task.budget}`;
+      });
     }
 
-    function show(data) {
-      run = data
-      index = 0
-      document.getElementById("load").hidden = true
-      document.getElementById("app").hidden = false
-      render()
+    function fillTasks(payload) {
+      const select = document.getElementById("task");
+      select.innerHTML = state.tasks.map((task) =>
+        `<option value="${esc(task.name)}">${esc(task.name)} · 目标 ${task.target_ms == null ? "未设" : task.target_ms + "ms"} · 预算 ${task.budget}</option>`
+      ).join("");
+      const llm = document.getElementById("proposer").querySelector('option[value="llm"]');
+      if (!payload.llm_available) {
+        llm.disabled = true;
+        llm.textContent = "LLM（未配置 key）";
+      }
+      const first = state.tasks[0];
+      if (first) document.getElementById("budget").placeholder = `默认 ${first.budget}`;
     }
 
-    document.addEventListener("keydown", (event) => {
-      if (!run) return
-      if (event.key === "ArrowRight") move(1)
-      if (event.key === "ArrowLeft") move(-1)
-    })
-
-    function options() {
-      return traces.map((item) => {
-        const speedup = item.speedup == null ? "-" : `${Number(item.speedup).toFixed(2)}×`
-        const selected = run && item.path === run._path ? "selected" : ""
-        return `<option value="${esc(item.path)}" ${selected}>${esc(item.task)} · ${esc(item.best)} · ${speedup}</option>`
-      }).join("")
+    function fillTraces(traces) {
+      state.traces = traces || [];
+      renderReport();
     }
 
-    function render() {
-      const round = run.rounds[index]
-      const shape = (run.shape || []).join("×")
-      const metrics = run.metrics || {}
-      const speedup = metrics.speedup == null ? "-" : `${Number(metrics.speedup).toFixed(2)}×`
-      const status = round.status || "baseline"
-      const good = status === "accepted" || status === "baseline"
-      const warn = status === "rejected_slower"
-      document.getElementById("app").innerHTML = `
-        <aside class="sider">
-          <div class="brand">适配台</div>
-          ${traces.length > 1 ? `<select class="tracebar" id="trace">${options()}</select>` : ""}
-          <div class="group">${esc(run.reference_file || "")}</div>
-          <div class="rounds" role="tablist">
-            ${run.rounds.map((item, i) => `
-              <button class="round" type="button" role="tab" data-i="${i}" ${i === index ? 'aria-current="true"' : ""}>
-                <b>${i} ${esc(item.title)}</b>
-                <small>${item.latency_ms == null ? esc(LABELS[item.status] || "未测") : ms(item.latency_ms)}</small>
-              </button>
-            `).join("")}
-          </div>
-        </aside>
-        <section class="stage">
-          <div class="head">
-            <div>
-              <p class="meta">${esc(run.card)} · ${esc(run.entry)} · 形状 ${shape} · 目标 ${run.target_ms == null ? "未设" : ms(run.target_ms)} · ${esc(run.device || "cpu")} · ${esc(run.proposer || "")}</p>
-              <h1>第 ${round.round} 轮 · ${esc(round.title)}</h1>
-            </div>
-            <div class="chips">
-              <span class="chip ${good ? "ok" : warn ? "warn" : "bad"}">${esc(LABELS[status] || status)}</span>
-              <span class="chip ${round.latency_ms == null ? "bad" : ""}">${round.latency_ms == null ? "这一轮未测" : ms(round.latency_ms)}</span>
-            </div>
-          </div>
-          <p class="meta">总加速 ${speedup} · ${esc(run.stop || "")}</p>
-          <div class="log">
-            ${(round.steps || []).map((item, i) => `
-              <article class="step">
-                <div class="spine"><div class="dot ${item.state}"></div></div>
-                <div class="body">
-                  <h2>${i + 1}. ${esc(item.title)}</h2>
-                  <p>${esc(item.detail || "")}</p>
-                  ${bars(item.bars)}
-                </div>
-              </article>
-            `).join("")}
-          </div>
-          <div class="actions">
-            <button class="btn" type="button" id="prev" ${index === 0 ? "disabled" : ""}>上一轮</button>
-            <button class="btn primary" type="button" id="next" ${index === run.rounds.length - 1 ? "disabled" : ""}>下一轮</button>
-          </div>
-        </section>
-      `
-      document.querySelectorAll(".round").forEach((button) => {
-        button.addEventListener("click", () => {
-          index = Number(button.dataset.i)
-          render()
-        })
-      })
-      const select = document.getElementById("trace")
-      if (select) {
-        select.addEventListener("change", async (event) => {
-          try {
-            const body = await api("/api/loop/run?path=" + encodeURIComponent(event.target.value))
-            show(body.data)
-          } catch (error) {
-            document.getElementById("load").hidden = false
-            document.getElementById("load").textContent = error.message || "读取失败"
+    async function startRun() {
+      if (state.run && state.run.state === "running") return;
+      const task = document.getElementById("task").value;
+      const proposer = document.getElementById("proposer").value;
+      const bestOf = Number(document.getElementById("bestof").value || 1);
+      const budgetRaw = document.getElementById("budget").value.trim();
+      const body = { task, proposer, best_of: bestOf };
+      if (budgetRaw) body.budget = Number(budgetRaw);
+      setBusy(true);
+      setStatus("正在启动…");
+      try {
+        const res = await api("/api/run", { method: "POST", body: JSON.stringify(body) });
+        state.run = res.data;
+        document.getElementById("stopbtn").hidden = false;
+        renderConsole();
+        renderRuns();
+        pollRun(res.data.id);
+      } catch (error) {
+        setBusy(false);
+        setStatus("启动失败");
+        showConsole();
+        document.getElementById("log").innerHTML = `<span class="bad">${esc(error.message)}</span>`;
+      }
+    }
+
+    async function stopRun() {
+      if (!state.run || !["running", "stopping"].includes(state.run.state)) return;
+      const button = document.getElementById("stopbtn");
+      button.disabled = true;
+      button.textContent = "停止中…";
+      setStatus("正在停止…");
+      try {
+        await api("/api/run/stop", { method: "POST", body: JSON.stringify({ id: state.run.id }) });
+      } catch (error) {
+        setStatus("停止失败");
+        button.disabled = false;
+        button.textContent = "停止";
+      }
+    }
+
+    function pollRun(id) {
+      clearTimeout(state.poll);
+      state.poll = setTimeout(async () => {
+        try {
+          const res = await api("/api/run?id=" + encodeURIComponent(id));
+          state.run = res.data;
+          state.runs = [res.data, ...state.runs.filter((item) => item.id !== res.data.id)];
+          renderConsole();
+          renderRuns();
+          if (res.data.state === "running" || res.data.state === "stopping") {
+            renderLiveRounds();
+            pollRun(id);
+            return;
           }
-        })
+          setBusy(false);
+          refreshRuns();
+          if (res.data.state === "cancelled") {
+            setStatus("已停止");
+            renderConsole();
+            refreshTraces();
+            return;
+          }
+          if (res.data.state === "done" && res.data.trace_path) {
+            const body = await api("/api/loop/run?path=" + encodeURIComponent(res.data.trace_path) + "&diff=1");
+            showTrace(body.data);
+            setStatus(`完成 · ${body.data.best} · ${Number(body.data.metrics.speedup).toFixed(2)}×`);
+          } else {
+            setStatus("运行失败");
+            showConsole();
+          }
+          refreshTraces();
+        } catch (error) {
+          setBusy(false);
+          setStatus("轮询失败");
+          document.getElementById("log").innerHTML += `\n<span class="bad">${esc(error.message)}</span>`;
+        }
+      }, 450);
+    }
+
+    function renderLiveRounds() {
+      const run = state.run;
+      if (!run) return;
+      document.getElementById("timeline").innerHTML = `
+        <h3>运行中 · ${esc(run.task)}</h3>
+        ${run.rounds.map((round) => `
+          <div class="round inflight">
+            <span class="dot ${esc(round.status)}"></span>
+            <span class="t"><b>${round.round} ${esc(round.title || round.name)}</b><small>${esc(LABELS[round.status] || round.status)}</small></span>
+            <span class="r">${round.latency_ms == null ? "-" : ms(round.latency_ms)}</span>
+          </div>
+        `).join("") || '<div class="empty">等待第一轮…</div>'}
+      `;
+      const last = run.rounds[run.rounds.length - 1];
+      document.getElementById("detail").innerHTML = last ? `
+        <div class="detail-head">
+          <h2>第 ${last.round} 轮 · ${esc(last.title || last.name)}</h2>
+          <p>${esc(last.message || "")}</p>
+          <div class="chips">
+            <span class="chip ${last.status === "accepted" ? "ok" : "bad"}">${esc(LABELS[last.status] || last.status)}</span>
+            <span class="chip">${last.latency_ms == null ? "未测速" : ms(last.latency_ms)}</span>
+            ${last.speedup_vs_baseline == null ? "" : `<span class="chip ok">${Number(last.speedup_vs_baseline).toFixed(2)}× 基线</span>`}
+          </div>
+        </div>
+        <div class="empty">运行还在进行，结束后这里会显示完整门禁步骤、profile 和源码差异。</div>
+      ` : "";
+    }
+
+    function renderConsole() {
+      const run = state.run;
+      if (!run) return;
+      showConsole();
+      const stateText = { running: "运行中", stopping: "停止中", done: "已完成", cancelled: "已停止", error: "失败" }[run.state] || run.state;
+      document.getElementById("console-meta").textContent =
+        `${stateText} · ${run.elapsed_s.toFixed(1)}s · ${run.proposer}`;
+      const log = document.getElementById("log");
+      log.innerHTML = (run.lines || []).map((line) => {
+        const cls = /compile_error|accuracy_fail|timeout|crash|error|失败|Traceback/.test(line) ? "bad"
+          : /accepted|完成|target/.test(line) ? "ok" : "";
+        return cls ? `<span class="${cls}">${esc(line)}</span>` : esc(line);
+      }).join("\n") || "…";
+      log.scrollTop = log.scrollHeight;
+    }
+
+    function showConsole() {
+      document.getElementById("console").hidden = false;
+    }
+
+    function showTrace(data, keepConsole = false) {
+      clearTimeout(state.poll);
+      state.trace = data;
+      state.index = defaultIndex(data);
+      state.tab = "source";
+      if (!keepConsole) {
+        state.run = null;
+        document.getElementById("console").hidden = true;
       }
-      document.getElementById("prev").addEventListener("click", () => move(-1))
-      document.getElementById("next").addEventListener("click", () => move(1))
+      syncTaskSelect(data.task, data.proposer);
+      renderAll();
+    }
+
+    function syncTaskSelect(taskName, proposer) {
+      const select = document.getElementById("task");
+      if (taskName && [...select.options].some((option) => option.value === taskName)) {
+        select.value = taskName;
+        const budget = document.getElementById("budget");
+        if (!budget.value) budget.placeholder = `默认 ${state.tasks.find((item) => item.name === taskName)?.budget ?? 8}`;
+      }
+      const pselect = document.getElementById("proposer");
+      const kind = String(proposer || "").split(":")[0];
+      if (kind && [...pselect.options].some((option) => option.value === kind && !option.disabled)) {
+        pselect.value = kind;
+      }
+    }
+
+    function defaultIndex(data) {
+      const rounds = data.rounds || [];
+      for (let i = rounds.length - 1; i >= 0; i -= 1) {
+        if (rounds[i].status === "accepted") return i;
+      }
+      return Math.max(0, rounds.length - 1);
+    }
+
+    function renderAll() {
+      renderCards();
+      renderTimeline();
+      renderDetail();
+      renderReport();
+    }
+
+    function renderCards() {
+      const trace = state.trace;
+      const box = document.getElementById("cards");
+      if (!trace) { box.innerHTML = ""; return; }
+      const m = trace.metrics || {};
+      const speedup = m.speedup == null ? null : Number(m.speedup);
+      const met = m.target_met;
+      box.innerHTML = `
+        <div class="card"><div class="k">基线</div><div class="v">${m.baseline_ms == null ? "-" : Number(m.baseline_ms).toFixed(3)} <small>ms</small></div></div>
+        <div class="card ${met ? "good" : "warn"}"><div class="k">最优</div><div class="v">${m.best_ms == null ? "-" : Number(m.best_ms).toFixed(3)} <small>ms</small></div></div>
+        <div class="card ${met ? "good" : m.best_ms == null ? "bad" : "warn"}"><div class="k">总加速</div><div class="v">${speedup == null ? "-" : speedup.toFixed(2) + " <small>×</small>"}</div></div>
+        <div class="card ${met === true ? "good" : met === false ? "bad" : ""}"><div class="k">目标</div><div class="v">${m.target_ms == null ? "未设" : Number(m.target_ms).toFixed(3) + " <small>ms</small>"} <small>${met === true ? "✓ 达标" : met === false ? "未达标" : ""}</small></div></div>
+        <div class="card"><div class="k">轮次 / 实验</div><div class="v">${m.rounds ?? "-"} <small>/ ${m.experiments ?? "-"}</small></div></div>
+        ${m.tokens ? `<div class="card"><div class="k">token 用量</div><div class="v">${Number(m.tokens).toLocaleString()} <small>tokens</small></div></div>` : ""}
+        <div class="card"><div class="k">停止原因</div><div class="v" style="font-size:15px">${esc(STOP_LABELS[m.stop_reason] || m.stop_reason || "-")}</div></div>
+      `;
+    }
+
+    function renderTimeline() {
+      const trace = state.trace;
+      const box = document.getElementById("timeline");
+      if (!trace) return;
+      box.innerHTML = `
+        <h3>${esc(trace.task)} · ${esc(trace.proposer || "")}</h3>
+        ${trace.rounds.map((round, i) => `
+          <button class="round" type="button" data-i="${i}" ${i === state.index ? 'aria-current="true"' : ""}>
+            <span class="dot ${esc(round.status)}"></span>
+            <span class="t"><b>${round.round} ${esc(round.title || round.name)}</b><small>${esc(LABELS[round.status] || round.status)}</small></span>
+            <span class="r">${round.latency_ms == null ? "-" : ms(round.latency_ms)}${round.speedup_vs_baseline ? `<br>${Number(round.speedup_vs_baseline).toFixed(1)}×` : ""}</span>
+          </button>
+        `).join("")}
+      `;
+      box.querySelectorAll(".round").forEach((button) => {
+        button.addEventListener("click", () => {
+          state.index = Number(button.dataset.i);
+          renderTimeline();
+          renderDetail();
+        });
+      });
+    }
+
+    function renderDetail() {
+      const trace = state.trace;
+      const box = document.getElementById("detail");
+      if (!trace) return;
+      const round = trace.rounds[state.index];
+      if (!round) { box.innerHTML = '<div class="empty">这条轨迹没有轮次</div>'; return; }
+      const status = round.status || "baseline";
+      const chip = status === "accepted" || status === "baseline" ? "ok" : status === "rejected_slower" ? "warn" : "bad";
+      const source = round.source || "";
+      const diff = round.diff || [];
+      box.innerHTML = `
+        <div class="detail-head">
+          <h2>第 ${round.round} 轮 · ${esc(round.title || round.name)}</h2>
+          <p>${esc(round.hypothesis || "")}</p>
+          <div class="chips">
+            <span class="chip ${chip}">${esc(LABELS[status] || status)}</span>
+            <span class="chip">${round.latency_ms == null ? "未测速" : ms(round.latency_ms)}</span>
+            ${round.speedup_vs_baseline == null ? "" : `<span class="chip ok">${Number(round.speedup_vs_baseline).toFixed(2)}× 基线</span>`}
+            ${round.speedup_vs_best == null ? "" : `<span class="chip warn">${Number(round.speedup_vs_best).toFixed(2)}× 当前最优</span>`}
+            ${round.max_abs_err == null ? "" : `<span class="chip">max_abs_err ${Number(round.max_abs_err).toExponential(2)}</span>`}
+          </div>
+        </div>
+        <div class="steps">
+          ${(round.steps || []).map((step, i) => `
+            <div class="step">
+              <div class="spine"><span class="dot ${esc(step.state)}"></span></div>
+              <div class="body">
+                <h4>${i + 1}. ${esc(step.title)}</h4>
+                <p>${esc(step.detail || "")}</p>
+                ${bars(step.bars)}
+              </div>
+            </div>
+          `).join("")}
+        </div>
+        <div class="tabs">
+          <button class="tab" type="button" data-tab="source" aria-selected="${state.tab === "source"}">候选源码</button>
+          <button class="tab" type="button" data-tab="diff" aria-selected="${state.tab === "diff"}">与原版 diff</button>
+        </div>
+        <div class="code-wrap">${state.tab === "source" ? sourceBlock(source) : diffBlock(diff)}</div>
+      `;
+      box.querySelectorAll(".tab").forEach((tab) => {
+        tab.addEventListener("click", () => {
+          state.tab = tab.dataset.tab;
+          renderDetail();
+        });
+      });
+    }
+
+    function sourceBlock(source) {
+      if (!source) return '<div class="empty">这一轮没有源码（例如没有给出候选）。</div>';
+      return `<pre class="code">${esc(source)}</pre>`;
+    }
+
+    function diffBlock(lines) {
+      if (!lines || !lines.length) return '<div class="empty">没有可比较的源码。</div>';
+      return `<pre class="code">${lines.map((line) => {
+        const text = esc(line);
+        if (line.startsWith("+++") || line.startsWith("---")) return `<span class="head">${text}</span>`;
+        if (line.startsWith("@@")) return `<span class="hunk">${text}</span>`;
+        if (line.startsWith("+")) return `<span class="add">${text}</span>`;
+        if (line.startsWith("-")) return `<span class="del">${text}</span>`;
+        return text;
+      }).join("\n")}</pre>`;
+    }
+
+    function renderRuns() {
+      const box = document.getElementById("runs-list");
+      if (!box) return;
+      if (!state.runs.length) {
+        box.innerHTML = '<div class="empty">这次服务启动后还没有运行记录</div>';
+        return;
+      }
+      const stateLabel = { running: "运行中", stopping: "停止中", done: "完成", cancelled: "已停止", error: "失败" };
+      box.innerHTML = state.runs.map((run) => `
+        <button class="run-item" type="button" data-id="${esc(run.id)}">
+          <span class="dot ${esc(run.state === "stopping" ? "running" : run.state)}"></span>
+          <span class="meta">
+            <b>${esc(run.task)} · ${esc(run.proposer)}</b>
+            <small>${esc(run.id)} · ${Number(run.elapsed_s || 0).toFixed(1)}s${run.trace_path ? " · 有轨迹" : ""}</small>
+          </span>
+          <span class="state ${esc(run.state)}">${esc(stateLabel[run.state] || run.state)}</span>
+          <span class="r">${run.state === "running" || run.state === "stopping" ? "查看 ›" : "打开 ›"}</span>
+        </button>
+      `).join("");
+      box.querySelectorAll(".run-item").forEach((item) => {
+        item.addEventListener("click", () => openRun(item.dataset.id));
+      });
+    }
+
+    async function openRun(id) {
+      if (state.run && ["running", "stopping"].includes(state.run.state) && state.run.id !== id) {
+        setStatus("已有运行在进行，先停止再切换");
+        return;
+      }
+      try {
+        const res = await api("/api/run?id=" + encodeURIComponent(id));
+        const run = res.data;
+        state.run = run;
+        if (run.state === "running" || run.state === "stopping") {
+          setBusy(true);
+          document.getElementById("stopbtn").hidden = false;
+          renderConsole();
+          pollRun(run.id);
+          return;
+        }
+        setBusy(false);
+        if (run.trace_path && run.state === "done") {
+          const body = await api("/api/loop/run?path=" + encodeURIComponent(run.trace_path) + "&diff=1");
+          showTrace(body.data, true);
+          state.run = run;
+          renderConsole();
+          setStatus(`历史轨迹 · ${run.task} · ${run.proposer}`);
+          return;
+        }
+        renderConsole();
+        setStatus(run.state === "cancelled" ? "这次运行已停止" : "这次运行失败了");
+      } catch (error) {
+        setStatus("读取运行记录失败");
+      }
+    }
+
+    async function refreshRuns() {
+      try {
+        const body = await api("/api/runs");
+        state.runs = body.data || [];
+        renderRuns();
+      } catch (error) { /* 运行记录刷新失败不影响主视图 */ }
+    }
+
+    function renderReport() {
+      const grid = document.getElementById("report-grid");
+      if (!grid) return;
+      const latest = new Map();
+      for (const item of state.traces) {
+        const prev = latest.get(item.task);
+        if (!prev || item.mtime > prev.mtime) latest.set(item.task, item);
+      }
+      const items = [...latest.values()].sort((a, b) => String(a.task).localeCompare(String(b.task)));
+      if (!items.length) { grid.innerHTML = '<div class="empty">还没有轨迹</div>'; return; }
+      grid.innerHTML = items.map((item) => `
+        <button class="tcard" type="button" data-path="${esc(item.path)}">
+          <b>${esc(item.task)}</b>
+          <div class="big">${item.speedup == null ? "-" : Number(item.speedup).toFixed(2) + "×"}</div>
+          <small>${item.target_met ? "达标" : "未达标"} · ${item.rounds || 0} 轮 · ${esc(item.proposer || "")}</small>
+        </button>
+      `).join("");
+      grid.querySelectorAll(".tcard").forEach((card) => {
+        card.addEventListener("click", async () => {
+          try {
+            const body = await api("/api/loop/run?path=" + encodeURIComponent(card.dataset.path) + "&diff=1");
+            showTrace(body.data);
+            window.scrollTo({ top: 0, behavior: "smooth" });
+          } catch (error) {
+            setStatus("读取轨迹失败");
+          }
+        });
+      });
+    }
+
+    async function refreshTraces() {
+      try {
+        const body = await api("/api/traces");
+        fillTraces(body.data || []);
+      } catch (error) { /* 汇总刷新失败不影响主视图 */ }
     }
 
     function bars(items) {
-      if (!items || !items.length) return ""
-      const max = Math.max(...items.map((item) => item.value))
+      if (!items || !items.length) return "";
+      const max = Math.max(...items.map((item) => item.value));
       return `<div class="meters">${items.map((item) => `
         <div class="meter">
           <b>${esc(item.name)}</b>
           <div class="track"><div class="fill" style="width:${Math.max(4, (item.value / max) * 100)}%"></div></div>
           <div class="vals">${Number(item.value).toFixed(0)} μs</div>
         </div>
-      `).join("")}</div>`
+      `).join("")}</div>`;
     }
 
-    function move(delta) {
-      const next = index + delta
-      if (!run || next < 0 || next >= run.rounds.length) return
-      index = next
-      render()
+    function setBusy(busy) {
+      const button = document.getElementById("runbtn");
+      button.disabled = busy;
+      button.textContent = busy ? "运行中…" : "开始运行";
+      ["task", "proposer", "bestof", "budget"].forEach((id) => { document.getElementById(id).disabled = busy; });
+      const stop = document.getElementById("stopbtn");
+      if (!busy) {
+        stop.hidden = true;
+        stop.disabled = false;
+        stop.textContent = "停止";
+      }
+    }
+
+    function setStatus(text) {
+      document.getElementById("status").textContent = text;
+    }
+
+    async function api(url, options = {}) {
+      const res = await fetch(url, { headers: { "Content-Type": "application/json" }, ...options });
+      let body;
+      try { body = await res.json(); } catch (error) { throw new Error(`HTTP ${res.status}`); }
+      if (body.code !== 0) throw new Error(body.message || `HTTP ${res.status}`);
+      return body;
     }
 
     function ms(value) {
-      return `${Number(value).toFixed(3)} ms`
+      return `${Number(value).toFixed(3)} ms`;
     }
 
     function esc(value) {
       return String(value == null ? "" : value).replace(/[&<>"']/g, (char) => ({
         "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;",
-      }[char]))
+      }[char]));
     }
   </script>
 </body>

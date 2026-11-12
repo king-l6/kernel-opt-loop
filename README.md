@@ -38,6 +38,7 @@ inbox/<task>/
         ▼
  scheduler.py ──────── 门禁顺序、采纳线、patience、查重、预算、停止
         │  ▲
+        │  ├────────── memory.py     跨运行经验：warm start、lessons、failures
         │  └────────── feedback.py   结构化反馈 + 一句话
         ▼
  proposers.py ──────── ScriptedProposer / LLMProposer / AgentProposer（带工具循环）
@@ -89,6 +90,9 @@ python serve.py
 
 # 5. 把任务集铺到多块设备上（同卡串行、跨卡并行）
 python fleet.py inbox --devices cpu,cuda:0 --budget 2
+
+# 6. 跨运行记忆（默认开启，存在 ./memory；下一次从上次最优继续）
+python run.py inbox/softmax --memory-dir memory
 ```
 
 ### 接真实 LLM
@@ -246,7 +250,7 @@ LLM 拿到的还包括任务规格、`device_info`（实际设备与峰值）、
 1. **策略**：只允许 `torch` / `triton` / `math` / `typing` / `numpy`；禁止 `open`、`eval`、`exec`、`import os/subprocess/socket/...`；必须定义入口函数。
 2. **编译**：沙箱里 `compile` + `exec`，语法/加载错误直接反馈，不测速。
 3. **精度**：多组输入（随机、大数、全零、非连续）逐组对照；形状、dtype、有限性、`allclose` 全过才继续。
-4. **测速**：warmup + 9 次重复，取 p50，同时记录 p90、min、max、CV；CUDA 上用 `torch.cuda.Event`。
+4. **测速**：warmup + 9 次重复，取 p50，同时记录 p90、min、max、CV；CUDA 上用 `torch.cuda.Event`。CV > 0.15 视为测量被瞬时干扰，自动重测一次，避免把噪声当成代码变慢。
 5. **采纳**：`当前最好 / 本次` ≥ `speedup_required`（默认 1.1）才替换；被采纳后再采一次 profile。
 6. **停止**：`target` / `budget` / `patience` / `no_proposal` / `token_budget` / `proposer_error`。
 
@@ -316,6 +320,49 @@ python fleet.py inbox --devices cpu,cuda:0 --budget 2
 
 ---
 
+## 跨运行经验：同一块卡上不从零开始
+
+单轮内循环只看得到最近几轮，换一次运行就全忘了。`memory.py` 按 `(算子, 设备)` 存一个 JSON（`memory/softmax@apple-m1.json`）：
+
+- `best`：上次最好的源码、耗时、相对基线加速比；
+- `lessons`：被采纳过的改法；
+- `failures`：反复出现的错误类型（语法、精度、超时…）和次数；
+- `dead_ends`：试过但没变快的方向。
+
+下一次运行开始，scheduler 先拿 `best.source` 直接上机（warm start，算 1 次实验）；过了门禁就把它当当前最优。没超过它也不会把记录删掉——只有真正崩了/精度不过才丢弃，避免一次噪声测量把积累的经验清空。
+
+`lessons / failures / dead_ends` 的压缩视图会作为 `memory` 字段进 prompt，Agent 不用重复踩同样的坑。
+
+```json
+{
+  "task": "softmax",
+  "device": "Apple M1",
+  "runs": 2,
+  "best": {
+    "latency_ms": 0.388,
+    "baseline_ms": 3.027,
+    "speedup": 7.80,
+    "source": "def softmax(x): ..."
+  },
+  "lessons": [
+    {"hypothesis": "减最大值保证数值稳定，同时用一次整块张量运算替掉逐行循环。", "speedup": 7.80}
+  ],
+  "failures": [
+    {"status": "accuracy_fail", "error_kind": "non_finite", "count": 1,
+     "message": "case 2: non-finite output"}
+  ],
+  "dead_ends": []
+}
+```
+
+实测同一台 M1 连跑两次：第一次 3.03 → 0.388 ms（7.80×）；第二次 warm start 直接 0.390 ms（7.41×，CV 0.024），不用重新摸一遍。
+
+- `--memory-dir` 指定目录；`--no-memory` 关闭（对照实验用）。
+- `fleet.py` 把记忆放在输出目录的 `_memory/` 下，按设备分开。
+- 跨卡不迁移：A100 的经验不会搬到 M1，不同卡的瓶颈不同，按 `(算子, 设备)` 隔离是刻意的。
+
+---
+
 ## 指标与可复现
 
 ```bash
@@ -358,6 +405,7 @@ feedback.py     结构化反馈 + 一句话
 proposers.py    ScriptedProposer / LLMProposer / AgentProposer / LLMClient
 probes.py       Agent 的试跑工具（独立预算 + AST 缓存）
 devices.py      设备识别、纸面峰值、有效带宽、单次 I/O 下界
+memory.py       跨运行经验：按 (算子, 设备) 存 best / lessons / failures
 catalogs.py     离线候选目录
 scheduler.py    门禁顺序、预算、采纳、停止、轨迹记录
 trace.py        环境指纹与落盘
@@ -371,6 +419,7 @@ serve.py        本地控制台 + 只读 API
 web/index.html  控制台页面
 test_agent.py   Agent 工具循环与试跑预算的测试
 test_devices.py 设备识别与带宽下界的测试
+test_memory.py  跨运行记忆与 warm start 的测试
 test_fleet.py   多设备矩阵的测试
 inbox/*         任务
 traces/*        轨迹
@@ -388,12 +437,12 @@ traces/*        轨迹
 | 设备反馈 | 设备识别、纸面峰值、最小 I/O 有效带宽、单次 I/O 下界、缓存识别、CUDA 时钟 | 真实 DRAM 计数与 occupancy（`ncu`/CUPTI）、ROCm/Ascend 适配、按卡归一化基线、降频进采纳判定 |
 | 任务规模 | 4 个归一化算子，固定 shape | 100 算子的任务生成器：reference、随机/隐藏精度用例、shape/dtype sweep、厂商库基线（cuBLAS/cuDNN） |
 | 调度与并发 | `fleet.py`：任务 × 设备矩阵，同卡串行、跨卡并行，不可用设备跳过 | 常驻队列、远程 worker、断点续跑、按卡配额 |
-| 经验回流 | 当前最优 + 最近 6 轮摘要 | 按 `(算子, 设备架构, 形状)` 存成功技巧/失败模式，检索进 prompt；跨任务迁移 |
-| 成本与统计 | token 预算、单次中位数、1.1× 采纳线 | prompt caching、噪声感知采纳（CV/置信区间）、防 memoization、隐藏用例 |
+| 经验回流 | 按 `(算子, 设备)` 存 best / lessons / failures / dead_ends，下次 warm start + 注入 prompt | 加形状维度、跨卡迁移、按相关性检索排序 |
+| 成本与统计 | token 预算、单次中位数、1.1× 采纳线、CV>0.15 重测 | prompt caching、置信区间采纳、防 memoization、隐藏用例 |
 
 **关键原则不变**：Agent 负责提出和试错，scheduler 负责预算、门禁和判定。给 Agent 更多工具，不等于让它改评测。
 
-已知限制：设备反馈用的是纸面峰值和「最小 I/O」下界，不是硬件计数器，所以小 shape 会命中缓存、多 pass 会被低估；单机内存态运行记录、进程级沙箱（不是容器）、CUDA/Triton 路径需要在有卡机器上验收、真实模型的动作协议目前是 JSON 而不是原生 tool call。
+已知限制：设备反馈用的是纸面峰值和「最小 I/O」下界，不是硬件计数器，所以小 shape 会命中缓存、多 pass 会被低估；经验存本地 JSON（单机、不做分布式同步）、噪声重测只能减轻瞬时干扰而不能替代置信区间采纳、进程级沙箱（不是容器）、CUDA/Triton 路径需要在有卡机器上验收、真实模型的动作协议目前是 JSON 而不是原生 tool call。
 
 ---
 

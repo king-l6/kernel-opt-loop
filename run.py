@@ -20,6 +20,8 @@ def main() -> None:
     parser.add_argument("--out", default="traces/latest.json")
     parser.add_argument("--device", help="cpu / mps / cuda / cuda:1 / auto")
     parser.add_argument("--peak-bw", type=float, help="覆盖设备的纸面峰值带宽（GB/s），用于未登记的卡")
+    parser.add_argument("--memory-dir", help="跨运行经验目录（默认 memory/）")
+    parser.add_argument("--no-memory", action="store_true", help="不读也不写跨运行经验")
     parser.add_argument("--timeout", type=float, help="单次沙箱执行的超时秒数")
     parser.add_argument("--seed", type=int)
     parser.add_argument("--threads", type=int)
@@ -62,6 +64,10 @@ def main() -> None:
         config.device = args.device
     if args.peak_bw is not None:
         config.peak_bw_gbps = args.peak_bw
+    if args.memory_dir:
+        config.memory_dir = args.memory_dir
+    if args.no_memory:
+        config.memory = False
     if args.timeout is not None:
         config.timeout_s = args.timeout
     if args.seed is not None:

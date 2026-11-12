@@ -129,3 +129,32 @@ def test_feedback_is_structured_not_a_bare_string():
     assert isinstance(ctx["feedback"], dict)
     assert "text" in ctx["feedback"]
     assert "def softmax" in ctx["current_best"]["source"]
+
+
+def test_noisy_measurement_is_retried_once():
+    from scheduler import _check_quiet
+
+    class NoisyRunner:
+        def __init__(self):
+            self.calls = []
+
+        def check(self, name, source, profile=False):
+            self.calls.append(name)
+            result = FakeResult("ok", 2.0 if len(self.calls) == 1 else 0.5)
+            result.stats["cv"] = 0.5 if len(self.calls) == 1 else 0.02
+            return result
+
+    runner = NoisyRunner()
+    config = _config(repeats=9)
+    result = _check_quiet(runner, "cand", "def softmax(x):\n    return x\n", config)
+    assert runner.calls == ["cand", "cand-retry"]
+    assert result.latency_ms == 0.5
+
+
+def test_stable_measurement_is_not_retried():
+    from scheduler import _check_quiet
+
+    runner = FakeRunner([FakeResult("ok", 10.0)])
+    config = _config()
+    _check_quiet(runner, "cand", "def softmax(x):\n    return x\n", config)
+    assert runner.calls == ["cand"]

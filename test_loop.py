@@ -14,6 +14,7 @@ def _config():
     config.repeats = 3
     config.warmup = 1
     config.threads = 1
+    config.memory = False
     return config
 
 

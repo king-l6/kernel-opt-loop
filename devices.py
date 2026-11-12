@@ -150,6 +150,14 @@ def label(spec: DeviceSpec) -> str:
     return f"{spec.name}{peak}"
 
 
+def slug(text: str) -> str:
+    """文件名安全的短标识：cuda:0 → cuda-0，Apple M1 → apple-m1。"""
+    slugged = "".join(
+        char if char.isalnum() or char in "-_." else "-" for char in str(text)
+    ).strip("-")
+    return slugged.lower() or "unknown"
+
+
 def analyze(spec: DeviceSpec, latency_ms: float | None, io_bytes: int | None) -> dict:
     """把一次测速解释成「离这块卡的单次 I/O 下界还有多远」。
 

@@ -246,6 +246,10 @@ SYSTEM_PROMPT = """你是 AI Infra 团队的算子优化 Agent。你的任务是
 - last_feedback.hardware 是当前设备上的访存视图：gbps 有效带宽、bw_pct 相对纸面峰值、floor_ms 单次 I/O 下界、advice 是下一步建议。
 - bw_pct 很低说明还没贴着带宽跑；接近 100% 或 cache_resident 时，继续提速只能减少字节数（融合、原地写、低精度）。
 
+历史经验：
+- memory 是同一算子在这块卡上以前跑出的结果：best 是上次最好、lessons 是被采纳的改法、failures 是反复出现的错误、dead_ends 是走不通的方向。
+- 优先在 best 的基础上继续改；不要重复 failures 和 dead_ends 里的方向。
+
 只输出 JSON，不要 markdown 代码围栏，不要额外解释。"""
 
 
@@ -368,6 +372,10 @@ AGENT_PROMPT = """你是 AI Infra 团队的算子优化 Agent。你可以先在�
 硬件反馈：
 - 试跑结果里的 hardware 是这台设备的访存视图：gbps 有效带宽、bw_pct 相对纸面峰值、floor_ms 单次 I/O 下界、advice 是下一步建议。
 - bw_pct 很低说明还没贴着带宽跑；接近 100% 或 cache_resident 时，继续提速只能减少字节数（融合、原地写、低精度）。
+
+历史经验：
+- memory 是同一算子在这块卡上以前跑出的结果：best 是上次最好、lessons 是被采纳的改法、failures 是反复出现的错误、dead_ends 是走不通的方向。
+- 优先在 best 的基础上继续改；不要重复 failures 和 dead_ends 里的方向。
 
 只输出 JSON，不要 markdown 代码围栏，不要额外解释。"""
 
@@ -531,6 +539,7 @@ def build_messages(ctx: dict, entry: str) -> list[dict]:
         "target_ms": ctx.get("target_ms"),
         "device": ctx.get("device"),
         "device_info": ctx.get("device_info"),
+        "memory": ctx.get("memory"),
         "triton_available": ctx.get("triton_ready"),
         "round": ctx.get("round"),
         "experiments_left": ctx.get("budget_left"),
@@ -559,6 +568,7 @@ def build_agent_messages(ctx: dict, entry: str, index: int = 0, sample_total: in
         "target_ms": ctx.get("target_ms"),
         "device": ctx.get("device"),
         "device_info": ctx.get("device_info"),
+        "memory": ctx.get("memory"),
         "triton_available": ctx.get("triton_ready"),
         "round": ctx.get("round"),
         "experiments_left": ctx.get("budget_left"),

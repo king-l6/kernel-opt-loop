@@ -13,13 +13,22 @@ import time
 from dataclasses import asdict, dataclass, is_dataclass
 
 import devices
+import memory as memory_mod
 from feedback import compact_history, make_feedback
 from policy import check_source
 from probes import ProbeSession
 from proposers import Patch, source_signature
 
 
-def run_schedule(task, proposer, runner, config, env: dict | None = None, on_round=None) -> dict:
+def run_schedule(
+    task,
+    proposer,
+    runner,
+    config,
+    env: dict | None = None,
+    on_round=None,
+    memory_store=None,
+) -> dict:
     started = time.time()
     history: list[dict] = []
     tried: dict[str, int] = {}
@@ -51,6 +60,12 @@ def run_schedule(task, proposer, runner, config, env: dict | None = None, on_rou
         spec = devices.spec_for(task, config, actual_device)
     best_hardware = devices.analyze(spec, baseline_ms, getattr(baseline, "io_bytes", None))
     probes = ProbeSession(task, runner, config, on_event=on_round, spec=spec)
+    memory_data = {}
+    if memory_store is not None:
+        try:
+            memory_data = memory_store.load(task.name, spec) or {}
+        except Exception:  # noqa: BLE001 - 记忆坏了不影响本次运行
+            memory_data = {}
     tried[source_signature(task.source)] = 0
     feedback = make_feedback(
         status="baseline",
@@ -92,8 +107,45 @@ def run_schedule(task, proposer, runner, config, env: dict | None = None, on_rou
 
     if _under_target(best_ms, getattr(config, "target_ms", None)):
         stop, stop_reason = _hit_target(best_ms, config.target_ms), "target"
-        return _trace(task, config, history, best_name, best_source, best_ms, baseline_ms, accepted, experiments, evaluations, tokens, stop, stop_reason, env, started, probes.used, spec)
+        trace = _trace(task, config, history, best_name, best_source, best_ms, baseline_ms, accepted, experiments, evaluations, tokens, stop, stop_reason, env, started, probes.used, spec)
+        return _save_memory(trace, memory_store, task, spec)
 
+    # 上次在这块卡上的最好版本先上机：通过就作为本轮的起点，
+    # 省掉重复生成，也避免 Agent 再走一遍已知的弯路。
+    warm_record = _warm_start(
+        task,
+        runner,
+        memory_data,
+        tried,
+        config,
+        spec,
+        round_no=len(history),
+        baseline_ms=baseline_ms,
+        best_ms=best_ms,
+        best_profile=best_profile,
+        feedback=feedback,
+        history=history,
+    )
+    if warm_record is not None:
+        experiments += 1
+        evaluations += 1
+        history.append(warm_record)
+        _notify(on_round, warm_record)
+        feedback = warm_record["feedback_out"]
+        if warm_record["status"] == "accepted":
+            accepted += 1
+            best_name = warm_record["name"]
+            best_source = warm_record["source"]
+            best_ms = warm_record["latency_ms"]
+            best_profile = warm_record["profile"] or best_profile
+            best_hardware = warm_record["hardware"] or best_hardware
+            patience = 0
+        if _under_target(best_ms, getattr(config, "target_ms", None)):
+            stop, stop_reason = _hit_target(best_ms, config.target_ms), "target"
+            trace = _trace(task, config, history, best_name, best_source, best_ms, baseline_ms, accepted, experiments, evaluations, tokens, stop, stop_reason, env, started, probes.used, spec)
+            return _save_memory(trace, memory_store, task, spec)
+
+    memory_view = memory_mod.summary(memory_data)
     while experiments < getattr(config, "budget", 8):
         if getattr(config, "max_tokens", None) and tokens >= int(config.max_tokens):
             stop, stop_reason = f"token 预算用完（{tokens}）。当前最好 {best_ms:.3f} ms。", "token_budget"
@@ -119,6 +171,7 @@ def run_schedule(task, proposer, runner, config, env: dict | None = None, on_rou
             "device": str(getattr(config, "device", "cpu")),
             "device_info": spec.as_dict(),
             "hardware": best_hardware,
+            "memory": memory_view,
             "triton_ready": bool(getattr(config, "triton_ready", False)),
         }
         probes.best_ms = best_ms
@@ -157,7 +210,7 @@ def run_schedule(task, proposer, runner, config, env: dict | None = None, on_rou
             round_started = time.perf_counter()
 
             status, message, error_kind, eval_result, candidate_profile = _gate(
-                task, patch, runner, tried, round_no
+                task, patch, runner, tried, round_no, config
             )
             if status == "evaluated":
                 evaluations += 1
@@ -248,7 +301,7 @@ def run_schedule(task, proposer, runner, config, env: dict | None = None, on_rou
     if not stop:
         stop = f"轮次用完。当前最好是 {best_ms:.3f} ms。"
         stop_reason = "budget"
-    return _trace(
+    trace = _trace(
         task,
         config,
         history,
@@ -267,6 +320,7 @@ def run_schedule(task, proposer, runner, config, env: dict | None = None, on_rou
         probes.used,
         spec,
     )
+    return _save_memory(trace, memory_store, task, spec)
 
 
 # --------------------------------------------------------------------------
@@ -274,7 +328,7 @@ def run_schedule(task, proposer, runner, config, env: dict | None = None, on_rou
 # --------------------------------------------------------------------------
 
 
-def _gate(task, patch: Patch, runner, tried, round_no):
+def _gate(task, patch: Patch, runner, tried, round_no, config):
     """返回 (status, message, error_kind, eval_result, candidate_profile)。
 
     status == "evaluated" 表示已经过沙箱，交给 _judge 判定快慢。
@@ -296,10 +350,33 @@ def _gate(task, patch: Patch, runner, tried, round_no):
             [],
         )
     tried[signature] = round_no
-    result = runner.check(patch.name, patch.source, profile=False)
+    result = _check_quiet(runner, patch.name, patch.source, config)
     if result.status != "ok":
         return result.status, result.message, result.error_kind, result, []
     return "evaluated", result.message, result.error_kind, result, []
+
+
+NOISE_CV = 0.15
+
+
+def _check_quiet(runner, name: str, source: str, config):
+    """噪声大时复测一次，取更稳的那次。
+
+    单次 p50 在系统有后台负载时会失真（实测出现过 6× 偏差）。CV 超过阈值
+    说明这次采样不可信：再跑一次，取更低的 p50；仍然不稳就按实测交给判定，
+    并把 stats 一起留在轨迹里，方便事后归因。
+    """
+    result = runner.check(name, source, profile=False)
+    cv = (getattr(result, "stats", None) or {}).get("cv")
+    repeats = int(getattr(config, "repeats", 9) or 0)
+    if result.status != "ok" or cv is None or cv <= NOISE_CV or repeats <= 1:
+        return result
+    again = runner.check(f"{name}-retry", source, profile=False)
+    if again.status == "ok" and again.latency_ms and (
+        not result.latency_ms or again.latency_ms < result.latency_ms
+    ):
+        return again
+    return result
 
 
 def _judge(result, best_ms, patch: Patch, config, runner):
@@ -314,6 +391,95 @@ def _judge(result, best_ms, patch: Patch, config, runner):
         "",
         [],
     )
+
+
+def _warm_start(
+    task,
+    runner,
+    memory_data,
+    tried,
+    config,
+    spec,
+    *,
+    round_no,
+    baseline_ms,
+    best_ms,
+    best_profile,
+    feedback,
+    history,
+):
+    """把上次的最优源码先跑一遍；通过就走正常门禁，不通过也记一轮。"""
+    source = memory_mod.best_source(memory_data)
+    if not source or source == task.source:
+        return None
+    signature = source_signature(source)
+    if signature in tried:
+        return None
+    tried[signature] = round_no
+
+    result = _check_quiet(runner, "warm-start", source, config)
+    required = float(getattr(config, "speedup_required", 1.1))
+    latency = result.latency_ms
+    if result.status != "ok":
+        status, message, error_kind, profile = result.status, result.message, result.error_kind, []
+    elif latency and best_ms / latency >= required:
+        status, message, error_kind = "accepted", f"耗时 {latency:.3f} ms", ""
+        profile = runner.profile("warm-start", source) if hasattr(runner, "profile") else []
+    else:
+        status = "rejected_slower"
+        message = f"耗时 {latency:.3f} ms，没超过 {best_ms:.3f} ms" if latency else "没有测到耗时"
+        error_kind, profile = "", []
+
+    hypothesis = (memory_data.get("best") or {}).get("hypothesis") or "上一次在这块卡上的最优版本"
+    hardware = devices.analyze(spec, latency, getattr(result, "io_bytes", None))
+    outcome = make_feedback(
+        status=status,
+        message=message,
+        error_kind=error_kind,
+        latency_ms=latency if status in {"accepted", "rejected_slower"} else None,
+        best_ms=best_ms,
+        baseline_ms=baseline_ms,
+        target_ms=getattr(config, "target_ms", None),
+        speedup_required=required,
+        profile=best_profile,
+        candidate_profile=profile,
+        tried=[],
+        history=compact_history(history, 6),
+        round_no=round_no,
+        hardware=hardware,
+    )
+    patch = Patch(name="warm-start", title="上次最优", source=source, hypothesis=hypothesis)
+    return _record(
+        round_no=round_no,
+        name="warm-start",
+        title="上次最优",
+        status=status,
+        hypothesis=hypothesis,
+        expected_gain=None,
+        source=source,
+        eval_result=result,
+        best_ms=best_ms,
+        baseline_ms=baseline_ms,
+        best_profile=best_profile,
+        candidate_profile=profile,
+        input_feedback=feedback,
+        outcome_feedback=outcome,
+        steps=_candidate_steps(patch, status, message, result, profile, feedback, outcome),
+        batch=None,
+        batch_index=0,
+        started=time.perf_counter(),
+        hardware=hardware,
+    )
+
+
+def _save_memory(trace: dict, memory_store, task, spec) -> dict:
+    if memory_store is None:
+        return trace
+    try:
+        memory_store.update(task.name, spec, trace)
+    except Exception:  # noqa: BLE001 - 记忆写失败不能影响轨迹
+        pass
+    return trace
 
 
 def _notify(on_round, record: dict) -> None:

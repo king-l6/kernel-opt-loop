@@ -8,6 +8,7 @@ from pathlib import Path
 
 from gates import Runner, best_device, triton_ready
 from intake import Task, load_task
+from memory import MemoryStore
 from proposers import make_proposer
 from scheduler import run_schedule
 from trace import env_fingerprint, load as load_trace, write as write_trace
@@ -33,6 +34,8 @@ class Config:
     probe_budget: int = 6
     device: str = "cpu"
     peak_bw_gbps: float | None = None
+    memory: bool = True
+    memory_dir: str = "memory"
     seed: int = 0
     temperature: float = 0.7
     triton_ready: bool = False
@@ -96,6 +99,7 @@ def run(
         label = getattr(proposer, "kind", type(proposer).__name__)
     config.proposer_label = label
     runner = Runner(task, config)
+    store = MemoryStore(config.memory_dir) if getattr(config, "memory", True) else None
     trace = run_schedule(
         task,
         proposer,
@@ -103,6 +107,7 @@ def run(
         config,
         env=env_fingerprint(config.device),
         on_round=on_round,
+        memory_store=store,
     )
     trace["proposer"] = label
     baseline_round = trace["rounds"][0] if trace.get("rounds") else {}

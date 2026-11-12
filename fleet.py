@@ -145,6 +145,7 @@ def _run_one(task_dir: Path, device: str, output: Path, proposer: str, budget: i
         task = load_task(task_dir)
         config = Config.from_task(task)
         config.device = device
+        config.memory_dir = str(output / "_memory")
         if budget is not None:
             config.budget = budget
         trace_path = output / f"{task.name}@{_slug(device)}.json"

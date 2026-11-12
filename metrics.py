@@ -48,6 +48,7 @@ def trace_metrics(trace: dict) -> dict:
         "rounds": int(metrics.get("rounds", max(0, len(trace.get("rounds", [])) - 1)) or 0),
         "experiments": experiments,
         "evaluations": evaluations,
+        "probes": int(metrics.get("probes", trace.get("probes", 0)) or 0),
         "accepted": accepted,
         "accept_rate": (accepted / experiments) if experiments else None,
         "tokens": int(metrics.get("tokens", trace.get("tokens", 0)) or 0),
@@ -64,6 +65,7 @@ def summarize(traces: list[dict]) -> dict:
     rounds = [row["rounds"] for row in rows]
     tokens = sum(row["tokens"] for row in rows)
     experiments = sum(row["experiments"] for row in rows)
+    probes = sum(row["probes"] for row in rows)
     elapsed = sum(row["elapsed_s"] for row in rows)
     return {
         "tasks": len(rows),
@@ -75,6 +77,7 @@ def summarize(traces: list[dict]) -> dict:
         "mean_rounds": statistics.fmean(rounds) if rounds else None,
         "accepted": sum(row["accepted"] for row in rows),
         "experiments": experiments,
+        "probes": probes,
         "tokens": tokens,
         "elapsed_s": elapsed,
         "tokens_per_success": (tokens / len(successes)) if successes else None,
@@ -108,8 +111,8 @@ def report_text(summary: dict) -> str:
     rate = "-" if summary["success_rate"] is None else f"{summary['success_rate']:.0%}"
     lines.append(
         f"tasks={summary['tasks']}  success@target={rate}  geomean={geomean_text}  "
-        f"experiments={summary['experiments']}  tokens={summary['tokens']}  "
-        f"elapsed={summary['elapsed_s']:.1f}s"
+        f"experiments={summary['experiments']}  probes={summary['probes']}  "
+        f"tokens={summary['tokens']}  elapsed={summary['elapsed_s']:.1f}s"
     )
     if summary["experiments_per_success"] is not None:
         lines.append(

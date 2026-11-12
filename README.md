@@ -2,7 +2,7 @@
 
 一个能在本机跑完的**算子优化 Agent 实验台**。
 
-Agent 每轮只拿到一份结构化反馈：上一轮的门禁结果、人类可读的一句话、当前最优源码与 profile、已尝试过的候选摘要。它交回下一版源码；源码先过静态策略，再进子进程沙箱，按「编译 → 精度 → 测速」三道门判定。只有**正确且比当前最好快 1.1×** 的版本才会替换最优；低于目标、预算用完、连续多轮没提升就停。每一轮的源码、门禁结果、反馈和 profile 都写进轨迹，可以重放核对。
+Agent 每轮拿到一份结构化反馈：上一轮的门禁结果、人类可读的一句话、当前最优源码与 profile、已尝试过的候选摘要。它可以在受限预算内先**试跑**候选、读完整错误和 profile，再交回下一版源码；源码先过静态策略，再进子进程沙箱，按「编译 → 精度 → 测速」三道门判定。只有**正确且比当前最好快 1.1×** 的版本才会替换最优；低于目标、预算用完、连续多轮没提升就停。每一轮的源码、门禁结果、反馈和 profile 都写进轨迹，可以重放核对。
 
 这台机器没有加速卡，默认在 CPU 上测；设备、线程数、超时、预算都在任务里声明。CUDA/Triton 的候选目录已经写好，换到有卡的机器上会自动进入候选。
 
@@ -37,8 +37,10 @@ inbox/<task>/
         │  ▲
         │  └────────── feedback.py   结构化反馈 + 一句话
         ▼
- proposers.py ──────── ScriptedProposer（离线） / LLMProposer（OpenAI 兼容 / Anthropic）
-        │ source
+ proposers.py ──────── ScriptedProposer / LLMProposer / AgentProposer（带工具循环）
+        │ source                 ▲
+        │                        │ probe（试跑、profile）
+        │                  probes.py ── 独立预算 + AST 缓存，不更新最优
         ▼
  policy.py ─────────── 允许的 import、禁止的文件/网络/进程调用、入口函数
         │
@@ -99,14 +101,38 @@ export KOPT_LLM_MODEL=claude-sonnet-5-5
 python run.py inbox/softmax --proposer llm --best-of 3
 ```
 
-`auto`（默认）会在检测到 key 时走 LLM，否则退回离线目录：
+`auto`（默认）会在检测到 key 时走 Agent（可试跑），否则退回离线目录：
 
 ```bash
-python run.py inbox/softmax                       # auto
-python run.py inbox/softmax --proposer scripted   # 强制离线
+python run.py inbox/softmax                       # auto -> agent
+python run.py inbox/softmax --proposer agent --probe-budget 3 --agent-steps 6
+python run.py inbox/softmax --proposer llm         # 单次提交，作为对照组
+python run.py inbox/softmax --proposer scripted    # 强制离线
 ```
 
 `--best-of 3` 会并行生成 3 个候选，串行评测，避免并行测速互相污染。
+
+### Agent 工具循环
+
+`AgentProposer` 每轮最多走 `agent_steps` 步，每一步只输出一个 JSON 动作：
+
+```json
+{"action": "probe", "source": "...", "profile": true}
+{"action": "submit", "source": "...", "hypothesis": "...", "expected_gain": 1.2}
+{"action": "give_up", "hypothesis": "原因"}
+```
+
+- `probe` 走和正式门禁完全相同的编译、精度、测速，返回 `status / message / stderr / latency / profile`；
+- 试跑结果按 AST 缓存，同一份源码不重复消耗真机；语法/策略错误不消耗试跑预算；
+- `probe_budget` 是整条运行的试跑上限，和 `budget`（提交实验数）分开计费；
+- 试跑不更新最优、不写轨迹；是否采纳仍由 scheduler 判定；步数用完时返回试跑过的最好一版。
+
+真实模型的最小验证（本机 CPU，1 次提交）：
+
+```bash
+python run.py inbox/softmax --proposer agent --budget 1 --probe-budget 1 --agent-steps 4
+# best: torch.softmax(x, dim=-1)  0.214 ms  speedup=13.76x  tokens≈4.2k
+```
 
 ### 网页控制台
 
@@ -149,6 +175,8 @@ python run.py inbox/softmax --proposer scripted   # 强制离线
   "speedup_required": 1.1,
   "timeout_s": 30,
   "threads": 4,
+  "agent_steps": 8,
+  "probe_budget": 6,
   "bench": {
     "args": [{"shape": [512, 1024], "dist": "randn", "seed": 1}]
   },
@@ -204,6 +232,8 @@ LLM 拿到的还包括任务规格、`reference_source`、当前最优源码和�
 
 查重按 AST 归一化后的 SHA-256 判定：改注释、改空白不算新候选，不会重复消耗沙箱。
 
+门禁自己用的原语（`allclose`、`isfinite`、Tensor 的 `shape/dtype`、计时函数）会在候选执行前抓取原始引用；候选改写 `torch.allclose = ...` 之类只影响它自己，不会影响判定。`policy.py` 也会直接拒绝改写模块/类属性的源码。
+
 ---
 
 ## 沙箱边界（诚实版）
@@ -226,7 +256,7 @@ LLM 拿到的还包括任务规格、`reference_source`、当前最优源码和�
 python report.py traces/suite
 ```
 
-输出每个任务的 `best / speedup / target / experiments / tokens`，以及：
+输出每个任务的 `best / speedup / target / experiments / probes / tokens`，以及：
 
 - `success@target`：达标任务占比；
 - `geomean_speedup`：跨任务几何平均加速；
@@ -259,7 +289,8 @@ sandbox.py      父进程侧沙箱
 worker.py       子进程侧编译/精度/测速/profile
 gates.py        Runner 与 Eval
 feedback.py     结构化反馈 + 一句话
-proposers.py    ScriptedProposer / LLMProposer / LLMClient
+proposers.py    ScriptedProposer / LLMProposer / AgentProposer / LLMClient
+probes.py       Agent 的试跑工具（独立预算 + AST 缓存）
 catalogs.py     离线候选目录
 scheduler.py    门禁顺序、预算、采纳、停止、轨迹记录
 trace.py        环境指纹与落盘
@@ -270,23 +301,32 @@ suite.py        任务集 CLI
 run.py          单任务 CLI
 serve.py        本地控制台 + 只读 API
 web/index.html  控制台页面
+test_agent.py   Agent 工具循环与试跑预算的测试
 inbox/*         任务
 traces/*        轨迹
 ```
 
 ---
 
-## 已知限制与下一步
+## 从单算子到「100 算子 × 多卡」
 
-- **更强隔离**：Docker/nsjail 适配器；网络默认拒绝。
-- **真 GPU**：`--device cuda` 已支持 CUDA events 计时和 Triton 候选；需要一台有卡机器做一次真实验收。
-- **国产芯片**：把 `device` 与 worker 的输入/测速分支抽象成 `DeviceAdapter`，接 CANN/Ascend C；当前只有接口位。
-- **整网与推理配置**：下一步是算子 + 显存 + 执行图 + vLLM/SGLang 配置的联合搜索，而不是只改单个 kernel。
-- **评测集**：扩充到 KernelBench/TritonBench 子集，按算子类别统计成功率。
-- **经验回流**：把成功轨迹提炼成技巧库，下一轮作为提示注入；当前只有历史摘要。
+目标不是单算子演示，而是让每个算子在不同加速卡上都能根据真机反馈持续变快。当前仓库完成的是**单卡内循环**；往外扩需要下面几层，接口已经按这个方向留位：
+
+| 层 | 现在 | 下一步 |
+|---|---|---|
+| 生成与验证 | Agent 可试跑、看 profile、再提交；门禁不可绕过 | 原生 tool-use / 多文件编辑；编译错误全文回传；失败方向作为下一轮硬约束 |
+| 设备反馈 | `torch.profiler` 的 self time、p50/p90/CV、设备/线程指纹 | `DeviceAdapter`：CUDA 接 `ncu`/CUPTI（SM 利用率、occupancy、访存、stall、寄存器压力），Ascend/ROCm 接各自 profiler；按卡归一化基线 |
+| 任务规模 | 4 个归一化算子，固定 shape | 100 算子的任务生成器：reference、随机/隐藏精度用例、shape/dtype sweep、厂商库基线（cuBLAS/cuDNN） |
+| 调度与并发 | 单机单进程，一次一个运行 | 任务队列 + 每卡 worker + 任务×设备矩阵；失败重试与设备隔离 |
+| 经验回流 | 当前最优 + 最近 6 轮摘要 | 按 `(算子, 设备架构, 形状)` 存成功技巧/失败模式，检索进 prompt；跨任务迁移 |
+| 成本与统计 | token 预算、单次中位数、1.1× 采纳线 | prompt caching、噪声感知采纳（CV/置信区间）、防 memoization、隐藏用例 |
+
+**关键原则不变**：Agent 负责提出和试错，scheduler 负责预算、门禁和判定。给 Agent 更多工具，不等于让它改评测。
+
+已知限制：单机内存态运行记录、进程级沙箱（不是容器）、CUDA/Triton 路径需要在有卡机器上验收、真实模型的动作协议目前是 JSON 而不是原生 tool call。
 
 ---
 
 ## 一句话讲这个项目
 
-> 我把算子优化做成了一个可复现的实验系统：候选代码进沙箱，编译/精度/性能三道门，只有更快才替换最优，轨迹能重放，效果用 success@target 和几何平均加速衡量。
+> 我把算子优化做成了一个可复现、可扩展的内循环 Agent：它在真机沙箱里试跑、读 profile、改代码，门禁决定是否采纳，轨迹能重放；目标是把同一套反馈驱动机制铺到 100 种算子和多种加速卡上。

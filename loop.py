@@ -29,6 +29,8 @@ class Config:
     profile_limit: int = 5
     threads: int | None = None
     max_tokens: int | None = None
+    agent_steps: int = 8
+    probe_budget: int = 6
     device: str = "cpu"
     seed: int = 0
     temperature: float = 0.7
@@ -48,6 +50,8 @@ class Config:
             memory_mb=task.memory_mb,
             profile_limit=task.profile_limit,
             threads=task.threads,
+            probe_budget=task.probe_budget,
+            agent_steps=task.agent_steps,
             device="cpu",
             seed=task.seed,
             temperature=task.temperature,

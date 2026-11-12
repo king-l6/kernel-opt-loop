@@ -178,8 +178,9 @@
       <label class="field"><span>生成器</span>
         <select id="proposer">
           <option value="scripted">离线候选目录</option>
-          <option value="auto">自动（有 key 走 LLM）</option>
-          <option value="llm">LLM</option>
+          <option value="auto">自动（有 key 走 Agent）</option>
+          <option value="agent">Agent（可试跑）</option>
+          <option value="llm">LLM（单次提交）</option>
         </select>
       </label>
       <label class="field"><span>best-of</span>
@@ -221,6 +222,7 @@
       baseline: "基线", accepted: "采纳", rejected_slower: "更慢",
       compile_error: "编译失败", accuracy_fail: "精度失败", timeout: "超时",
       crash: "崩溃", policy_error: "策略拒绝", duplicate: "重复",
+      probe_budget: "试跑预算用完",
     };
     const STOP_LABELS = {
       target: "达标停止", budget: "预算用完", patience: "连续无提升",
@@ -267,9 +269,12 @@
         `<option value="${esc(task.name)}">${esc(task.name)} · 目标 ${task.target_ms == null ? "未设" : task.target_ms + "ms"} · 预算 ${task.budget}</option>`
       ).join("");
       const llm = document.getElementById("proposer").querySelector('option[value="llm"]');
+      const agent = document.getElementById("proposer").querySelector('option[value="agent"]');
       if (!payload.llm_available) {
         llm.disabled = true;
         llm.textContent = "LLM（未配置 key）";
+        agent.disabled = true;
+        agent.textContent = "Agent（未配置 key）";
       }
       const first = state.tasks[0];
       if (first) document.getElementById("budget").placeholder = `默认 ${first.budget}`;
@@ -367,7 +372,7 @@
         ${run.rounds.map((round) => `
           <div class="round inflight">
             <span class="dot ${esc(round.status)}"></span>
-            <span class="t"><b>${round.round} ${esc(round.title || round.name)}</b><small>${esc(LABELS[round.status] || round.status)}</small></span>
+            <span class="t"><b>${round.kind === "probe" ? "试跑" : round.round + " "} ${esc(round.title || round.name)}</b><small>${esc(LABELS[round.status] || round.status)}</small></span>
             <span class="r">${round.latency_ms == null ? "-" : ms(round.latency_ms)}</span>
           </div>
         `).join("") || '<div class="empty">等待第一轮…</div>'}
@@ -375,7 +380,7 @@
       const last = run.rounds[run.rounds.length - 1];
       document.getElementById("detail").innerHTML = last ? `
         <div class="detail-head">
-          <h2>第 ${last.round} 轮 · ${esc(last.title || last.name)}</h2>
+          <h2>${last.kind === "probe" ? "试跑" : "第 " + last.round + " 轮"} · ${esc(last.title || last.name)}</h2>
           <p>${esc(last.message || "")}</p>
           <div class="chips">
             <span class="chip ${last.status === "accepted" ? "ok" : "bad"}">${esc(LABELS[last.status] || last.status)}</span>
@@ -462,6 +467,7 @@
         <div class="card ${met ? "good" : m.best_ms == null ? "bad" : "warn"}"><div class="k">总加速</div><div class="v">${speedup == null ? "-" : speedup.toFixed(2) + " <small>×</small>"}</div></div>
         <div class="card ${met === true ? "good" : met === false ? "bad" : ""}"><div class="k">目标</div><div class="v">${m.target_ms == null ? "未设" : Number(m.target_ms).toFixed(3) + " <small>ms</small>"} <small>${met === true ? "✓ 达标" : met === false ? "未达标" : ""}</small></div></div>
         <div class="card"><div class="k">轮次 / 实验</div><div class="v">${m.rounds ?? "-"} <small>/ ${m.experiments ?? "-"}</small></div></div>
+        ${m.probes ? `<div class="card"><div class="k">试跑</div><div class="v">${m.probes} <small>次</small></div></div>` : ""}
         ${m.tokens ? `<div class="card"><div class="k">token 用量</div><div class="v">${Number(m.tokens).toLocaleString()} <small>tokens</small></div></div>` : ""}
         <div class="card"><div class="k">停止原因</div><div class="v" style="font-size:15px">${esc(STOP_LABELS[m.stop_reason] || m.stop_reason || "-")}</div></div>
       `;
@@ -476,7 +482,7 @@
         ${trace.rounds.map((round, i) => `
           <button class="round" type="button" data-i="${i}" ${i === state.index ? 'aria-current="true"' : ""}>
             <span class="dot ${esc(round.status)}"></span>
-            <span class="t"><b>${round.round} ${esc(round.title || round.name)}</b><small>${esc(LABELS[round.status] || round.status)}</small></span>
+            <span class="t"><b>${round.kind === "probe" ? "试跑" : round.round + " "} ${esc(round.title || round.name)}</b><small>${esc(LABELS[round.status] || round.status)}</small></span>
             <span class="r">${round.latency_ms == null ? "-" : ms(round.latency_ms)}${round.speedup_vs_baseline ? `<br>${Number(round.speedup_vs_baseline).toFixed(1)}×` : ""}</span>
           </button>
         `).join("")}

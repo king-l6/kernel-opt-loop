@@ -39,7 +39,7 @@ WEB_RUN_DIR = TRACE_DIR / "web"
 PORT = 8765
 MAX_LINES = 2000
 MAX_BODY = 64 * 1024
-PROPOSERS = {"auto", "scripted", "llm"}
+PROPOSERS = {"auto", "scripted", "llm", "agent"}
 MIME = {
     ".html": "text/html; charset=utf-8",
     ".css": "text/css; charset=utf-8",
@@ -442,8 +442,9 @@ def _format_progress(event: dict) -> str:
     latency_text = "-" if latency is None else f"{float(latency):.3f} ms"
     speedup = event.get("speedup_vs_baseline")
     speedup_text = "" if speedup is None else f"  {float(speedup):.2f}×"
+    prefix = "[试跑]" if event.get("kind") == "probe" else f"[第 {event.get('round')} 轮]"
     return (
-        f"[第 {event.get('round')} 轮] {event.get('name')} · {event.get('status')}"
+        f"{prefix} {event.get('name')} · {event.get('status')}"
         f" · {latency_text}{speedup_text}  {event.get('message') or ''}"
     ).strip()
 

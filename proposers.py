@@ -335,6 +335,183 @@ class LLMProposer:
         return None
 
 
+AGENT_PROMPT = """你是 AI Infra 团队的算子优化 Agent。你可以先在真机上试跑候选，再提交最终版本。
+
+每一轮只输出一个 JSON 对象，三选一：
+1. 试跑：{{"action": "probe", "source": "完整 Python 源码", "hypothesis": "为什么可能更快", "profile": false}}
+   试跑会走和正式门禁相同的编译、精度、测速；profile=true 时额外返回最耗时的算子。
+   试跑不改变当前最优，也不消耗提交预算。
+2. 提交：{{"action": "submit", "source": "完整 Python 源码", "hypothesis": "一句话说明改了什么", "expected_gain": 1.2}}
+   提交后本轮结束，由门禁决定是否采纳。
+3. 放弃：{{"action": "give_up", "hypothesis": "原因"}}
+
+硬性约束：
+- 你还能试跑 {probe_budget} 次，每次结果里会告诉你剩余次数。
+- source 必须定义 {entry}(...)，签名与 reference 一致，返回 Tensor。
+- 只能 import torch、torch.nn.functional、triton、math、typing、numpy；禁止文件、网络、子进程、环境变量、print。
+- 禁止改写 torch / numpy 等模块或类属性（例如 torch.allclose = ...），这类源码会被直接拒绝。
+- 输出形状和 dtype 必须与输入一致；数值稳定：softmax/log_softmax 先减最大值，norm 必须加 eps。
+- 不要提交与历史相同、或只改注释/变量名的代码。
+
+优化方法：
+- 先正确，再性能；先看 profile 热点，再动手；
+- 去掉逐行 Python 循环，改成整块张量运算；
+- 减少中间张量和 copy，融合 exp/sum/div、mean/var；
+- CPU 可尝试 torch.compile；CUDA 可尝试 Triton 与更合适的 tile/warp 配置；
+- 每次只改一个主要变量，方便归因；
+- 试跑失败时读完整 stderr 和 error_kind 再修，不要盲目重复。
+
+只输出 JSON，不要 markdown 代码围栏，不要额外解释。"""
+
+
+class AgentProposer(LLMProposer):
+    """带受限工具循环的生成器：可以试跑、看 profile，再提交。
+
+    工具由 scheduler 通过 ctx["probe"] 注入；没有工具时退化成单次提议。
+    """
+
+    kind = "agent"
+
+    def __init__(
+        self,
+        client: LLMClient,
+        entry: str,
+        temperature: float = 0.7,
+        max_tokens: int = 4096,
+        max_steps: int = 8,
+        max_trajectory_tokens: int = 80_000,
+        repair_retries: int = 1,
+    ):
+        super().__init__(client, entry, temperature, max_tokens, repair_retries)
+        self.max_steps = max(1, int(max_steps))
+        self.max_trajectory_tokens = int(max_trajectory_tokens)
+        self.last_usage: dict = {}
+
+    def propose(self, ctx: dict, n: int = 1) -> list[Patch]:
+        self.last_error = ""
+        self.last_error_kind = ""
+        self.last_usage = {}
+        probe = ctx.get("probe")
+        patches: list[Patch] = []
+        seen: set[str] = set()
+        for index in range(max(1, n)):
+            patch = self._trajectory(ctx, index, probe)
+            if patch is None or not patch.source:
+                continue
+            signature = source_signature(patch.source)
+            if signature in seen:
+                continue
+            seen.add(signature)
+            patches.append(patch)
+        return patches
+
+    def _trajectory(self, ctx: dict, index: int, probe) -> Patch | None:
+        messages = build_agent_messages(ctx, self.entry, index, self.max_steps)
+        usage: dict = {}
+        probes_used = 0
+        best: tuple[float, str, str] | None = None
+        round_no = int(ctx.get("round", 0))
+
+        for step in range(self.max_steps):
+            try:
+                completion = self.client.complete(
+                    messages,
+                    max_tokens=self.max_tokens,
+                    temperature=self.temperature,
+                )
+            except LLMError as exc:
+                self.last_error = str(exc)
+                self.last_error_kind = getattr(exc, "kind", "fatal")
+                return None
+            usage = _merge_usage(usage, completion.usage)
+            self.last_usage = _merge_usage(self.last_usage, completion.usage)
+            if _usage_total(usage) > self.max_trajectory_tokens:
+                self.last_error = f"单条轨迹超过 {self.max_trajectory_tokens} tokens"
+                break
+
+            try:
+                data = _extract_json(completion.text)
+            except ValueError as exc:
+                self.last_error = f"JSON 解析失败：{exc}"
+                self.last_error_kind = "parse"
+                messages.append({"role": "assistant", "content": completion.text[:2000]})
+                messages.append(
+                    {
+                        "role": "user",
+                        "content": "上一个输出不是合法 JSON。只输出一个 JSON 对象，不要 markdown。",
+                    }
+                )
+                continue
+
+            action = str(data.get("action") or "submit").strip().lower()
+            source = data.get("source")
+            hypothesis = str(data.get("hypothesis") or "")
+            expected = _optional_float(data.get("expected_gain"))
+
+            if action == "give_up" or (action != "probe" and source is None):
+                self.last_error = f"模型放弃：{hypothesis}" if hypothesis else "模型放弃"
+                self.last_error_kind = "declined"
+                return None
+
+            if action == "probe":
+                if probe is None:
+                    self.last_error = "当前运行没有注入 probe 工具"
+                    self.last_error_kind = "fatal"
+                    return None
+                if not isinstance(source, str) or not source.strip():
+                    self.last_error = "probe 缺少 source"
+                    self.last_error_kind = "parse"
+                    continue
+                probes_used += 1
+                result = probe(
+                    source,
+                    profile=bool(data.get("profile")),
+                    name=f"agent-r{round_no}",
+                )
+                messages.append({"role": "assistant", "content": completion.text})
+                messages.append(
+                    {
+                        "role": "user",
+                        "content": "试跑结果：\n"
+                        + json.dumps(result, ensure_ascii=False),
+                    }
+                )
+                if result.get("status") == "ok" and result.get("latency_ms") is not None:
+                    latency = float(result["latency_ms"])
+                    if best is None or latency < best[0]:
+                        best = (latency, source, hypothesis)
+                continue
+
+            if not isinstance(source, str) or not source.strip():
+                self.last_error = "submit 缺少 source"
+                self.last_error_kind = "parse"
+                continue
+            return Patch(
+                name=f"agent-r{round_no}-{index}",
+                title=_short_title(hypothesis) or f"Agent 第 {round_no} 轮",
+                source=source,
+                hypothesis=hypothesis,
+                expected_gain=expected,
+                usage=usage,
+                meta={"steps": step + 1, "probes": probes_used},
+            )
+
+        if best is None:
+            if not self.last_error:
+                self.last_error = "Agent 没有在步数内提交候选"
+                self.last_error_kind = "parse"
+            return None
+        latency, source, hypothesis = best
+        return Patch(
+            name=f"agent-r{round_no}-{index}",
+            title=_short_title(hypothesis) or f"Agent 第 {round_no} 轮",
+            source=source,
+            hypothesis=hypothesis,
+            usage=usage,
+            meta={"steps": self.max_steps, "probes": probes_used, "exhausted": True, "probe_latency_ms": latency},
+        )
+
+
 def build_messages(ctx: dict, entry: str) -> list[dict]:
     feedback = dict(ctx.get("feedback") or {})
     feedback.pop("history", None)
@@ -362,6 +539,52 @@ def build_messages(ctx: dict, entry: str) -> list[dict]:
     ]
 
 
+def build_agent_messages(ctx: dict, entry: str, index: int = 0, sample_total: int = 1) -> list[dict]:
+    feedback = dict(ctx.get("feedback") or {})
+    feedback.pop("history", None)
+    payload = {
+        "task": ctx.get("task_spec"),
+        "reference_source": ctx.get("reference_source"),
+        "current_best": ctx.get("current_best"),
+        "baseline_ms": ctx.get("baseline_ms"),
+        "target_ms": ctx.get("target_ms"),
+        "device": ctx.get("device"),
+        "triton_available": ctx.get("triton_ready"),
+        "round": ctx.get("round"),
+        "experiments_left": ctx.get("budget_left"),
+        "sample_index": index + 1,
+        "sample_total": sample_total,
+        "last_feedback": feedback,
+        "history": compact_history(ctx.get("history") or [], limit=6),
+    }
+    system = AGENT_PROMPT.format(entry=entry, probe_budget=ctx.get("probe_budget", 0))
+    return [
+        {"role": "system", "content": system},
+        {
+            "role": "user",
+            "content": "以下是本轮上下文。先决定要不要试跑，再提交。只输出一个 JSON 对象：\n"
+            + json.dumps(payload, ensure_ascii=False, indent=2),
+        },
+    ]
+
+
+def _merge_usage(into: dict, extra: dict | None) -> dict:
+    for key in ("input_tokens", "output_tokens", "total_tokens"):
+        value = (extra or {}).get(key)
+        if value is not None:
+            into[key] = int(into.get(key) or 0) + int(value)
+    return into
+
+
+def _usage_total(usage: dict | None) -> int:
+    if not usage:
+        return 0
+    total = usage.get("total_tokens")
+    if total is not None:
+        return int(total)
+    return int(usage.get("input_tokens") or 0) + int(usage.get("output_tokens") or 0)
+
+
 def make_proposer(kind: str, task, config):
     device = str(getattr(config, "device", "cpu"))
     if device == "auto":
@@ -378,14 +601,24 @@ def make_proposer(kind: str, task, config):
                 f"任务 {task.name} 没有离线候选目录；用 --proposer llm，或在 catalogs.py 里补一份"
             )
         return ScriptedProposer(catalog, task.entry, device, ready), f"scripted:{task.name}"
-    if kind == "llm":
+    if kind in {"llm", "agent"}:
         client = LLMClient()
         if not client.available:
             raise RuntimeError(
                 "没有 LLM key。设置 KOPT_LLM_API_KEY/KOPT_LLM_BASE_URL/KOPT_LLM_MODEL，"
                 "或者用 --proposer scripted"
             )
-        label = f"llm:{client.provider}/{client.model}"
+        label = f"{kind}:{client.provider}/{client.model}"
+        if kind == "agent":
+            return (
+                AgentProposer(
+                    client,
+                    task.entry,
+                    temperature=getattr(config, "temperature", 0.7),
+                    max_steps=int(getattr(config, "agent_steps", 8)),
+                ),
+                label,
+            )
         return (
             LLMProposer(client, task.entry, temperature=getattr(config, "temperature", 0.7)),
             label,
@@ -394,9 +627,14 @@ def make_proposer(kind: str, task, config):
         raise ValueError(f"未知 proposer：{kind}")
     client = LLMClient()
     if client.available:
-        label = f"llm:{client.provider}/{client.model}"
+        label = f"agent:{client.provider}/{client.model}"
         return (
-            LLMProposer(client, task.entry, temperature=getattr(config, "temperature", 0.7)),
+            AgentProposer(
+                client,
+                task.entry,
+                temperature=getattr(config, "temperature", 0.7),
+                max_steps=int(getattr(config, "agent_steps", 8)),
+            ),
             label,
         )
     catalog = CATALOGS.get(task.name)

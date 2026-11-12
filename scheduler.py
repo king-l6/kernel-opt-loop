@@ -14,6 +14,7 @@ from dataclasses import asdict, dataclass, is_dataclass
 
 from feedback import compact_history, make_feedback
 from policy import check_source
+from probes import ProbeSession
 from proposers import Patch, source_signature
 
 
@@ -36,6 +37,7 @@ def run_schedule(task, proposer, runner, config, env: dict | None = None, on_rou
     stop_reason = ""
     batch_id = 0
     empty_streak = 0
+    probes = ProbeSession(task, runner, config, on_event=on_round)
 
     baseline = runner.check("baseline", task.source, profile=True)
     if baseline.status != "ok":
@@ -81,7 +83,7 @@ def run_schedule(task, proposer, runner, config, env: dict | None = None, on_rou
 
     if _under_target(best_ms, getattr(config, "target_ms", None)):
         stop, stop_reason = _hit_target(best_ms, config.target_ms), "target"
-        return _trace(task, config, history, best_name, best_source, best_ms, baseline_ms, accepted, experiments, evaluations, tokens, stop, stop_reason, env, started)
+        return _trace(task, config, history, best_name, best_source, best_ms, baseline_ms, accepted, experiments, evaluations, tokens, stop, stop_reason, env, started, probes.used)
 
     while experiments < getattr(config, "budget", 8):
         if getattr(config, "max_tokens", None) and tokens >= int(config.max_tokens):
@@ -108,6 +110,10 @@ def run_schedule(task, proposer, runner, config, env: dict | None = None, on_rou
             "device": str(getattr(config, "device", "cpu")),
             "triton_ready": bool(getattr(config, "triton_ready", False)),
         }
+        probes.best_ms = best_ms
+        probes.round_no = len(history)
+        ctx["probe"] = probes.probe
+        ctx["probe_budget"] = probes.left
         try:
             batch = proposer.propose(ctx, n=int(getattr(config, "best_of", 1)))
         except TypeError:
@@ -200,6 +206,7 @@ def run_schedule(task, proposer, runner, config, env: dict | None = None, on_rou
                 batch_index=index,
                 started=round_started,
                 tokens=patch.usage,
+                agent=patch.meta,
             )
             history.append(record)
             _notify(on_round, record)
@@ -234,6 +241,7 @@ def run_schedule(task, proposer, runner, config, env: dict | None = None, on_rou
         stop_reason,
         env,
         started,
+        probes.used,
     )
 
 
@@ -363,6 +371,7 @@ def _record(
     batch_index,
     started,
     tokens=None,
+    agent=None,
 ):
     latency = (
         eval_result.latency_ms
@@ -392,6 +401,7 @@ def _record(
         "threads": getattr(eval_result, "threads", None) if eval_result is not None else None,
         "wall_s": getattr(eval_result, "wall_s", 0.0) if eval_result is not None else 0.0,
         "tokens": tokens or {},
+        "agent": agent or {},
         "batch": batch,
         "batch_index": batch_index,
         "feedback_in": input_feedback,
@@ -526,6 +536,7 @@ def _trace(
     stop_reason,
     env,
     started,
+    probes=0,
 ) -> dict:
     speedup = _ratio(baseline_ms, best_ms)
     return {
@@ -549,6 +560,7 @@ def _trace(
         "accepted": accepted,
         "experiments": experiments,
         "evaluations": evaluations,
+        "probes": probes,
         "tokens": tokens,
         "stop": stop,
         "stop_reason": stop_reason,
@@ -567,6 +579,7 @@ def _trace(
             "accepted": accepted,
             "experiments": experiments,
             "evaluations": evaluations,
+            "probes": probes,
             "tokens": tokens,
             "rounds": len(history) - 1,
             "stop_reason": stop_reason,

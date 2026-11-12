@@ -12,7 +12,7 @@ from loop import Config, replay, run
 def main() -> None:
     parser = argparse.ArgumentParser(description="读入 reference.py，跑算子优化闭环")
     parser.add_argument("task", nargs="?", default="inbox/softmax")
-    parser.add_argument("--proposer", default="auto", choices=["auto", "scripted", "llm"])
+    parser.add_argument("--proposer", default="auto", choices=["auto", "scripted", "llm", "agent"])
     parser.add_argument("--best-of", type=int, help="每轮并行生成几个候选")
     parser.add_argument("--budget", type=int, help="最多消耗几个候选")
     parser.add_argument("--target", type=float, help="耗时目标（ms）")
@@ -22,6 +22,8 @@ def main() -> None:
     parser.add_argument("--seed", type=int)
     parser.add_argument("--threads", type=int)
     parser.add_argument("--max-tokens", type=int, help="整条轨迹的 token 预算")
+    parser.add_argument("--agent-steps", type=int, help="Agent 每轮最多几步（含试跑）")
+    parser.add_argument("--probe-budget", type=int, help="Agent 整条运行最多试跑几次")
     parser.add_argument("--temperature", type=float)
     parser.add_argument("--replay", help="重放某条轨迹 JSON，核对每轮状态")
     parser.add_argument("--lenient", action="store_true", help="重放时只报告不一致，不抛错")
@@ -62,6 +64,10 @@ def main() -> None:
         config.threads = args.threads
     if args.max_tokens is not None:
         config.max_tokens = args.max_tokens
+    if args.agent_steps is not None:
+        config.agent_steps = args.agent_steps
+    if args.probe_budget is not None:
+        config.probe_budget = args.probe_budget
     if args.temperature is not None:
         config.temperature = args.temperature
 

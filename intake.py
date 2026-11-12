@@ -31,6 +31,8 @@ class Task:
     memory_mb: int = 0
     threads: int | None = None
     profile_limit: int = 5
+    agent_steps: int = 8
+    probe_budget: int = 6
     dtype: str = "float32"
     seed: int = 0
     temperature: float = 0.7
@@ -109,6 +111,8 @@ def load_task(path: str | Path) -> Task:
         memory_mb=int(spec.get("memory_mb", 0)),
         threads=_optional_int(spec.get("threads")),
         profile_limit=int(spec.get("profile_limit", 5)),
+        agent_steps=int(spec.get("agent_steps", 8)),
+        probe_budget=int(spec.get("probe_budget", 6)),
         dtype=dtype,
         seed=int(spec.get("seed", 0)),
         temperature=float(spec.get("temperature", 0.7)),
@@ -194,6 +198,8 @@ _KNOWN_KEYS = {
     "memory_mb",
     "threads",
     "profile_limit",
+    "agent_steps",
+    "probe_budget",
     "seed",
     "temperature",
 }
